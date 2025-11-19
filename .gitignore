@@ -22,7 +22,9 @@ rad.json
 TestResults.xml
 
 #DatasetJSON
-py150/python50k_eval.json
-py150/python100k_train.json
+py150_files/
+
+#Preprocessed tokenized datasets (too large for git)
+token_completion/
 
 venv/
