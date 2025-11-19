@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""
+Training script for code completion model.
+Supports both token-level and line-level completion tasks.
+"""
+
+import os
+import json
+import argparse
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from collections import Counter
+from tqdm import tqdm
+import numpy as np
+
+from model import CodeCompletionTransformer, ModelConfig
+
+class Vocabulary:
+    """Build vocabulary from tokenized data."""
+    
+    def __init__(self, special_tokens=None):
+        self.special_tokens = special_tokens or ['<PAD>', '<UNK>', '<s>', '</s>', '<EOL>']
+        self.token_to_idx = {}
+        self.idx_to_token = {}
+        self.token_counts = Counter()
+        
+        # Add special tokens first
+        for token in self.special_tokens:
+            self.add_token(token)
+    
+    def add_token(self, token):
+        if token not in self.token_to_idx:
+            idx = len(self.token_to_idx)
+            self.token_to_idx[token] = idx
+            self.idx_to_token[idx] = token
+    
+    def build_from_files(self, file_paths, min_freq=1):
+        """Build vocabulary from tokenized text files."""
+        print("Building vocabulary...")
+        for file_path in file_paths:
+            if not os.path.exists(file_path):
+                continue
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    tokens = line.strip().split()
+                    self.token_counts.update(tokens)
+        
+        # Add tokens that meet minimum frequency
+        for token, count in self.token_counts.items():
+            if count >= min_freq:
+                self.add_token(token)
+        
+        print(f"Vocabulary size: {len(self.token_to_idx)}")
+        return len(self.token_to_idx)
+    
+    def encode(self, tokens, max_length=None, pad=True):
+        """Convert tokens to indices."""
+        indices = [self.token_to_idx.get(token, self.token_to_idx['<UNK>']) for token in tokens]
+        
+        if max_length:
+            if len(indices) > max_length:
+                indices = indices[:max_length]
+            elif pad and len(indices) < max_length:
+                pad_idx = self.token_to_idx['<PAD>']
+                indices = indices + [pad_idx] * (max_length - len(indices))
+        
+        return indices
+    
+    def decode(self, indices):
+        """Convert indices to tokens."""
+        return [self.idx_to_token.get(idx, '<UNK>') for idx in indices]
+
+class TokenLevelDataset(Dataset):
+    """Dataset for token-level code completion."""
+    
+    def __init__(self, jsonl_file, vocab, max_length=256):
+        self.vocab = vocab
+        self.max_length = max_length
+        self.examples = []
+        
+        print(f"Loading {jsonl_file}...")
+        with open(jsonl_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                example = json.loads(line)
+                self.examples.append(example)
+        print(f"Loaded {len(self.examples)} examples")
+    
+    def __len__(self):
+        return len(self.examples)
+    
+    def __getitem__(self, idx):
+        example = self.examples[idx]
+        context = example['context'].split()
+        target = example['target']
+        
+        # Create input sequence: context + target
+        input_tokens = context + [target]
+        
+        # Encode to indices
+        input_ids = self.vocab.encode(input_tokens, max_length=self.max_length, pad=True)
+        target_idx = self.vocab.token_to_idx.get(target, self.vocab.token_to_idx['<UNK>'])
+        
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'target': torch.tensor(target_idx, dtype=torch.long),
+            'context_length': len(context)
+        }
+
+class LineLevelDataset(Dataset):
+    """Dataset for line-level code completion."""
+    
+    def __init__(self, jsonl_file, vocab, max_context_length=256, max_suffix_length=64):
+        self.vocab = vocab
+        self.max_context_length = max_context_length
+        self.max_suffix_length = max_suffix_length
+        self.examples = []
+        
+        print(f"Loading {jsonl_file}...")
+        with open(jsonl_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                example = json.loads(line)
+                self.examples.append(example)
+        print(f"Loaded {len(self.examples)} examples")
+    
+    def __len__(self):
+        return len(self.examples)
+    
+    def __getitem__(self, idx):
+        example = self.examples[idx]
+        previous_lines = example['previous_lines'].split() if example['previous_lines'] else []
+        prefix = example['prefix'].split()
+        suffix = example['suffix'].split()
+        
+        # Combine context: previous_lines + prefix
+        context = previous_lines + ['<EOL>'] + prefix if previous_lines else prefix
+        
+        # Truncate if needed
+        if len(context) > self.max_context_length:
+            context = context[-self.max_context_length:]
+        
+        if len(suffix) > self.max_suffix_length:
+            suffix = suffix[:self.max_suffix_length]
+        
+        # Encode
+        context_ids = self.vocab.encode(context, max_length=self.max_context_length, pad=True)
+        suffix_ids = self.vocab.encode(suffix, max_length=self.max_suffix_length, pad=True)
+        
+        return {
+            'context_ids': torch.tensor(context_ids, dtype=torch.long),
+            'suffix_ids': torch.tensor(suffix_ids, dtype=torch.long),
+            'context_length': len(context),
+            'suffix_length': len(suffix)
+        }
+
+def collate_token_level(batch):
+    """Collate function for token-level dataset."""
+    input_ids = torch.stack([item['input_ids'] for item in batch])
+    targets = torch.stack([item['target'] for item in batch])
+    return {
+        'input_ids': input_ids,
+        'targets': targets
+    }
+
+def collate_line_level(batch):
+    """Collate function for line-level dataset."""
+    context_ids = torch.stack([item['context_ids'] for item in batch])
+    suffix_ids = torch.stack([item['suffix_ids'] for item in batch])
+    return {
+        'context_ids': context_ids,
+        'suffix_ids': suffix_ids
+    }
+
+def train_token_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda'):
+    """Train model for token-level completion."""
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
+    
+    best_val_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        # Training
+        model.train()
+        train_loss = 0
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+        
+        for batch in train_pbar:
+            input_ids = batch['input_ids'].to(device)
+            targets = batch['targets'].to(device)
+            
+            # Forward pass
+            logits = model(input_ids)  # [B, T, vocab_size]
+            
+            # Get logits for last position (next token prediction)
+            last_logits = logits[:, -1, :]  # [B, vocab_size]
+            
+            # Compute loss
+            loss = criterion(last_logits, targets)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            train_loss += loss.item()
+            train_pbar.set_postfix({'loss': loss.item()})
+        
+        avg_train_loss = train_loss / len(train_loader)
+        
+        # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
+            for batch in val_pbar:
+                input_ids = batch['input_ids'].to(device)
+                targets = batch['targets'].to(device)
+                
+                logits = model(input_ids)
+                last_logits = logits[:, -1, :]
+                loss = criterion(last_logits, targets)
+                
+                val_loss += loss.item()
+                val_pbar.set_postfix({'loss': loss.item()})
+        
+        avg_val_loss = val_loss / len(val_loader)
+        
+        print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), 'best_model_token_level.pt')
+            print(f"Saved best model (val_loss: {avg_val_loss:.4f})")
+
+def train_line_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda'):
+    """Train model for line-level completion."""
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
+    
+    best_val_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        # Training
+        model.train()
+        train_loss = 0
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+        
+        for batch in train_pbar:
+            context_ids = batch['context_ids'].to(device)
+            suffix_ids = batch['suffix_ids'].to(device)
+            
+            # Forward pass on context
+            logits = model(context_ids)  # [B, T, vocab_size]
+            
+            # Predict suffix tokens sequentially
+            # For simplicity, we predict each suffix token given context + previous suffix tokens
+            total_loss = 0
+            batch_size = context_ids.size(0)
+            
+            # Start with context, then append suffix tokens one by one
+            current_input = context_ids
+            for i in range(suffix_ids.size(1) - 1):
+                # Get logits for next token
+                logits = model(current_input)
+                next_logits = logits[:, -1, :]  # [B, vocab_size]
+                next_target = suffix_ids[:, i]  # [B]
+                
+                # Compute loss
+                loss = criterion(next_logits, next_target)
+                total_loss += loss
+                
+                # Append predicted token to input for next step
+                next_token = suffix_ids[:, i:i+1]  # [B, 1]
+                current_input = torch.cat([current_input, next_token], dim=1)
+                # Truncate if too long
+                if current_input.size(1) > config.max_len:
+                    current_input = current_input[:, -config.max_len:]
+            
+            avg_loss = total_loss / (suffix_ids.size(1) - 1)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            avg_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            train_loss += avg_loss.item()
+            train_pbar.set_postfix({'loss': avg_loss.item()})
+        
+        avg_train_loss = train_loss / len(train_loader)
+        
+        # Validation (similar to training)
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
+            for batch in val_pbar:
+                context_ids = batch['context_ids'].to(device)
+                suffix_ids = batch['suffix_ids'].to(device)
+                
+                current_input = context_ids
+                total_loss = 0
+                for i in range(suffix_ids.size(1) - 1):
+                    logits = model(current_input)
+                    next_logits = logits[:, -1, :]
+                    next_target = suffix_ids[:, i]
+                    loss = criterion(next_logits, next_target)
+                    total_loss += loss
+                    
+                    next_token = suffix_ids[:, i:i+1]
+                    current_input = torch.cat([current_input, next_token], dim=1)
+                    if current_input.size(1) > config.max_len:
+                        current_input = current_input[:, -config.max_len:]
+                
+                avg_loss = total_loss / (suffix_ids.size(1) - 1)
+                val_loss += avg_loss.item()
+                val_pbar.set_postfix({'loss': avg_loss.item()})
+        
+        avg_val_loss = val_loss / len(val_loader)
+        
+        print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), 'best_model_line_level.pt')
+            print(f"Saved best model (val_loss: {avg_val_loss:.4f})")
+
+def main():
+    parser = argparse.ArgumentParser(description="Train code completion model")
+    parser.add_argument("--dataset_dir", type=str, default="completion_datasets",
+                        help="Directory containing completion datasets")
+    parser.add_argument("--task", type=str, choices=['token', 'line'], default='token',
+                        help="Task type: token-level or line-level")
+    parser.add_argument("--tokenized_dir", type=str, default="token_completion",
+                        help="Directory with tokenized files for vocabulary building")
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--max_length", type=int, default=256)
+    parser.add_argument("--device", type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument("--vocab_min_freq", type=int, default=2,
+                        help="Minimum frequency for vocabulary tokens")
+    
+    args = parser.parse_args()
+    
+    print(f"Using device: {args.device}")
+    
+    # Build vocabulary from tokenized files
+    vocab = Vocabulary()
+    vocab_files = [
+        os.path.join(args.tokenized_dir, "train.txt"),
+        os.path.join(args.tokenized_dir, "dev.txt"),
+        os.path.join(args.tokenized_dir, "test.txt")
+    ]
+    vocab_size = vocab.build_from_files(vocab_files, min_freq=args.vocab_min_freq)
+    
+    # Update config with actual vocab size
+    config = ModelConfig()
+    config.vocab_size = vocab_size
+    config.max_len = args.max_length
+    
+    # Save vocabulary
+    vocab_path = 'vocab.json'
+    with open(vocab_path, 'w') as f:
+        json.dump({
+            'token_to_idx': vocab.token_to_idx,
+            'idx_to_token': {str(k): v for k, v in vocab.idx_to_token.items()}
+        }, f, indent=2)
+    print(f"Saved vocabulary to {vocab_path}")
+    
+    # Create model
+    model = CodeCompletionTransformer(config)
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # Create datasets and dataloaders
+    if args.task == 'token':
+        train_dataset = TokenLevelDataset(
+            os.path.join(args.dataset_dir, "token_level", "train.jsonl"),
+            vocab, args.max_length
+        )
+        val_dataset = TokenLevelDataset(
+            os.path.join(args.dataset_dir, "token_level", "dev.jsonl"),
+            vocab, args.max_length
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                                 shuffle=True, collate_fn=collate_token_level)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
+                               shuffle=False, collate_fn=collate_token_level)
+        
+        train_token_level(model, train_loader, val_loader, config, 
+                         args.num_epochs, args.device)
+    
+    else:  # line-level
+        train_dataset = LineLevelDataset(
+            os.path.join(args.dataset_dir, "line_level", "train.jsonl"),
+            vocab, args.max_length, max_suffix_length=64
+        )
+        val_dataset = LineLevelDataset(
+            os.path.join(args.dataset_dir, "line_level", "dev.jsonl"),
+            vocab, args.max_length, max_suffix_length=64
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                                 shuffle=True, collate_fn=collate_line_level)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
+                               shuffle=False, collate_fn=collate_line_level)
+        
+        train_line_level(model, train_loader, val_loader, config, 
+                        args.num_epochs, args.device)
+    
+    print("Training complete!")
+
+if __name__ == "__main__":
+    main()
+
