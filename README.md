@@ -18,6 +18,7 @@ cs559_code_completion/
 ├── create_completion_datasets.py # Create token/line-level completion datasets
 ├── train.py                      # Training script
 ├── inference.py                  # Inference script
+├── requirements.txt              # Python dependencies
 ├── download_and_extract.sh       # Script to download py150 dataset
 ├── literals.json                 # Common string/number literals for tokenization
 ├── py150_files/                  # Dataset directory (Python source files)
@@ -36,17 +37,27 @@ cs559_code_completion/
 
 ## Setup
 
-1. **Download and extract the dataset:**
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+   
+   Or install individually:
+   ```bash
+   pip install torch tqdm numpy
+   ```
+
+2. **Download and extract the dataset:**
    ```bash
    bash download_and_extract.sh
    ```
 
-2. **Preprocess the data:**
+3. **Preprocess the data:**
    ```bash
    python preprocess.py --base_dir py150_files --output_dir token_completion
    ```
 
-3. **Create completion datasets:**
+4. **Create completion datasets:**
    ```bash
    python create_completion_datasets.py \
        --input_dir token_completion \
