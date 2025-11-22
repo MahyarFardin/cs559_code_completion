@@ -134,6 +134,8 @@ The `create_completion_datasets.py` script creates task-specific datasets:
 - `--num_epochs`: Number of training epochs (default: 10)
 - `--max_length`: Maximum sequence length (default: 256)
 - `--vocab_min_freq`: Minimum token frequency for vocabulary (default: 2)
+- `--vocab_sample_lines`: Sample N lines for vocabulary building (None = all, use to save memory)
+- `--lazy_load`: Use lazy loading for datasets (default: True, saves memory)
 - `--device`: `cuda` or `cpu` (auto-detected)
 
 ### Output Files
@@ -224,6 +226,43 @@ with torch.no_grad():
     predicted_token = vocab.idx_to_token[predicted_token_idx]
     print(f"Next token: {predicted_token}")
 ```
+
+## Troubleshooting
+
+### Memory Issues (Process Killed)
+
+If training starts but gets killed due to memory issues:
+
+1. **Reduce batch size**:
+   ```bash
+   python train.py --batch_size 8  # or even 4
+   ```
+
+2. **Use lazy loading** (enabled by default):
+   ```bash
+   python train.py --lazy_load  # Already default
+   ```
+
+3. **Sample vocabulary building**:
+   ```bash
+   python train.py --vocab_sample_lines 100000  # Only use 100k lines for vocab
+   ```
+
+4. **Reduce sequence length**:
+   ```bash
+   python train.py --max_length 128  # Instead of 256
+   ```
+
+5. **Process smaller dataset first**:
+   - Test with a subset of data to verify it works
+   - Use `--limit` in `create_completion_datasets.py` to create smaller datasets
+
+### Other Issues
+
+- **Out of memory**: Reduce `--batch_size` or `--max_length`
+- **Slow training**: Use GPU (`--device cuda`) or reduce batch size
+- **Poor predictions**: Train longer, check data quality, adjust learning rate
+- **Process killed during vocabulary building**: Use `--vocab_sample_lines` to limit vocabulary building
 
 ## To Do
 
