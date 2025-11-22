@@ -118,13 +118,25 @@ class TokenLevelDataset(Dataset):
     
     def __getitem__(self, idx):
         if self.lazy_load:
-            # Load example on-demand (more memory efficient)
-            # Note: This is slower but uses much less memory
+            # Use seek-based access for faster random access
+            # Cache file positions for efficiency
+            if not hasattr(self, '_file_positions'):
+                # Build position cache on first access
+                self._file_positions = []
+                with open(self.jsonl_file, 'rb') as f:
+                    pos = 0
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            break
+                        self._file_positions.append(pos)
+                        pos = f.tell()
+            
+            # Seek to position and read line
             with open(self.jsonl_file, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f):
-                    if i == idx:
-                        example = json.loads(line)
-                        break
+                f.seek(self._file_positions[idx])
+                line = f.readline()
+                example = json.loads(line)
         else:
             example = self.examples[idx]
         
@@ -181,12 +193,25 @@ class LineLevelDataset(Dataset):
     
     def __getitem__(self, idx):
         if self.lazy_load:
-            # Load example on-demand
+            # Use seek-based access for faster random access
+            # Cache file positions for efficiency
+            if not hasattr(self, '_file_positions'):
+                # Build position cache on first access
+                self._file_positions = []
+                with open(self.jsonl_file, 'rb') as f:
+                    pos = 0
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            break
+                        self._file_positions.append(pos)
+                        pos = f.tell()
+            
+            # Seek to position and read line
             with open(self.jsonl_file, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f):
-                    if i == idx:
-                        example = json.loads(line)
-                        break
+                f.seek(self._file_positions[idx])
+                line = f.readline()
+                example = json.loads(line)
         else:
             example = self.examples[idx]
         
@@ -408,8 +433,10 @@ def main():
                         help="Minimum frequency for vocabulary tokens")
     parser.add_argument("--vocab_sample_lines", type=int, default=None,
                         help="Sample N lines for vocabulary building (None = all)")
-    parser.add_argument("--lazy_load", action="store_true", default=True,
-                        help="Use lazy loading for datasets (saves memory)")
+    parser.add_argument("--lazy_load", action="store_true", default=False,
+                        help="Use lazy loading for datasets (saves memory but slower)")
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="Number of data loading workers (0 = single process)")
     
     args = parser.parse_args()
     
@@ -454,9 +481,11 @@ def main():
         )
         
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-                                 shuffle=True, collate_fn=collate_token_level)
+                                 shuffle=True, collate_fn=collate_token_level,
+                                 num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
-                               shuffle=False, collate_fn=collate_token_level)
+                               shuffle=False, collate_fn=collate_token_level,
+                               num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         
         train_token_level(model, train_loader, val_loader, config, 
                          args.num_epochs, args.device)
@@ -472,9 +501,11 @@ def main():
         )
         
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-                                 shuffle=True, collate_fn=collate_line_level)
+                                 shuffle=True, collate_fn=collate_line_level,
+                                 num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
-                               shuffle=False, collate_fn=collate_line_level)
+                               shuffle=False, collate_fn=collate_line_level,
+                               num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         
         train_line_level(model, train_loader, val_loader, config, 
                         args.num_epochs, args.device)
