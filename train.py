@@ -168,12 +168,13 @@ class TokenLevelDataset(Dataset):
 class LineLevelDataset(Dataset):
     """Dataset for line-level code completion."""
     
-    def __init__(self, jsonl_file, vocab, max_context_length=256, max_suffix_length=64, lazy_load=True):
+    def __init__(self, jsonl_file, vocab, max_context_length=256, max_suffix_length=64, lazy_load=True, max_examples=None):
         self.vocab = vocab
         self.max_context_length = max_context_length
         self.max_suffix_length = max_suffix_length
         self.jsonl_file = jsonl_file
         self.lazy_load = lazy_load
+        self.max_examples = max_examples
         
         if lazy_load:
             # Count lines without loading all data
@@ -182,18 +183,26 @@ class LineLevelDataset(Dataset):
             with open(jsonl_file, 'r', encoding='utf-8') as f:
                 for _ in f:
                     self.num_examples += 1
+                    if max_examples and self.num_examples >= max_examples:
+                        break
                     if self.num_examples % 10000 == 0:
                         print(f"  Counted {self.num_examples} examples...")
+            if max_examples:
+                self.num_examples = min(self.num_examples, max_examples)
             print(f"Found {self.num_examples} examples (lazy loading enabled)")
             self.examples = None
         else:
-            # Load all examples into memory (original behavior)
+            # Load examples into memory (with optional limit)
             self.examples = []
             print(f"Loading {jsonl_file}...")
             with open(jsonl_file, 'r', encoding='utf-8') as f:
                 for line in f:
+                    if max_examples and len(self.examples) >= max_examples:
+                        break
                     example = json.loads(line)
                     self.examples.append(example)
+                    if len(self.examples) % 10000 == 0:
+                        print(f"  Loaded {len(self.examples)} examples...")
             print(f"Loaded {len(self.examples)} examples")
             self.num_examples = len(self.examples)
     
@@ -512,11 +521,11 @@ def main():
     else:  # line-level
         train_dataset = LineLevelDataset(
             os.path.join(args.dataset_dir, "line_level", "train.jsonl"),
-            vocab, args.max_length, max_suffix_length=64, lazy_load=args.lazy_load
+            vocab, args.max_length, max_suffix_length=64, lazy_load=args.lazy_load, max_examples=args.max_train_examples
         )
         val_dataset = LineLevelDataset(
             os.path.join(args.dataset_dir, "line_level", "dev.jsonl"),
-            vocab, args.max_length, max_suffix_length=64, lazy_load=args.lazy_load
+            vocab, args.max_length, max_suffix_length=64, lazy_load=args.lazy_load, max_examples=args.max_val_examples
         )
         
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
