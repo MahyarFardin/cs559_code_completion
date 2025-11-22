@@ -186,51 +186,117 @@ def main():
             continue
         
         print(f"\nProcessing {split}...")
-        sequences = load_tokenized_file(input_file, limit=args.limit)
         
-        if args.limit:
-            print(f"  Limited to {len(sequences)} sequences")
-        
-        print(f"  Loaded {len(sequences)} sequences")
+        # Process file line-by-line to avoid loading everything into memory
+        chunk_size = args.chunk_size
+        sequence_count = 0
+        chunk = []
         
         # Token-level dataset
         if args.token_level:
             print(f"  Creating token-level dataset...")
-            token_examples = []
-            # Process in chunks to save memory
-            chunk_size = args.chunk_size
-            for i in range(0, len(sequences), chunk_size):
-                chunk = sequences[i:i+chunk_size]
-                chunk_examples = create_token_level_dataset(chunk, args.max_length)
-                token_examples.extend(chunk_examples)
-                if (i // chunk_size + 1) % 10 == 0:
-                    print(f"    Processed {min(i+chunk_size, len(sequences))}/{len(sequences)} sequences...")
-            
             output_file = os.path.join(args.output_dir, "token_level", f"{split}.jsonl")
-            save_token_level_dataset(token_examples, output_file)
-            print(f"  Created {len(token_examples)} token-level examples -> {output_file}")
+            total_examples = 0
+            with open(output_file, 'w', encoding='utf-8') as f, \
+                 open(input_file, 'r', encoding='utf-8') as infile:
+                for line in infile:
+                    if args.limit and sequence_count >= args.limit:
+                        break
+                    line = line.strip()
+                    if line:
+                        tokens = line.split()
+                        # Remove <s> and </s> markers
+                        if tokens and tokens[0] == "<s>":
+                            tokens = tokens[1:]
+                        if tokens and tokens[-1] == "</s>":
+                            tokens = tokens[:-1]
+                        if tokens:
+                            chunk.append(tokens)
+                            sequence_count += 1
+                            
+                            # Process chunk when it reaches chunk_size
+                            if len(chunk) >= chunk_size:
+                                chunk_examples = create_token_level_dataset(chunk, args.max_length)
+                                for context, target in chunk_examples:
+                                    example = {"context": context, "target": target}
+                                    f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                                total_examples += len(chunk_examples)
+                                chunk = []  # Clear chunk
+                                
+                                if sequence_count % (chunk_size * 10) == 0:
+                                    print(f"    Processed {sequence_count} sequences ({total_examples:,} examples so far)...")
+                
+                # Process remaining chunk
+                if chunk:
+                    chunk_examples = create_token_level_dataset(chunk, args.max_length)
+                    for context, target in chunk_examples:
+                        example = {"context": context, "target": target}
+                        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                    total_examples += len(chunk_examples)
+            print(f"  Created {total_examples:,} token-level examples from {sequence_count} sequences -> {output_file}")
         
-        # Line-level dataset
+        # Line-level dataset - process file again (or could combine, but simpler to separate)
         if args.line_level:
             print(f"  Creating line-level dataset...")
-            line_examples = []
-            # Process in chunks to save memory
-            chunk_size = args.chunk_size
-            for i in range(0, len(sequences), chunk_size):
-                chunk = sequences[i:i+chunk_size]
-                chunk_examples = create_line_level_dataset(
-                    chunk, 
-                    args.min_prefix_length, 
-                    args.max_prefix_ratio,
-                    args.examples_per_line
-                )
-                line_examples.extend(chunk_examples)
-                if (i // chunk_size + 1) % 10 == 0:
-                    print(f"    Processed {min(i+chunk_size, len(sequences))}/{len(sequences)} sequences...")
-            
             output_file = os.path.join(args.output_dir, "line_level", f"{split}.jsonl")
-            save_line_level_dataset(line_examples, output_file)
-            print(f"  Created {len(line_examples)} line-level examples -> {output_file}")
+            total_examples = 0
+            sequence_count = 0
+            chunk = []
+            with open(output_file, 'w', encoding='utf-8') as f, \
+                 open(input_file, 'r', encoding='utf-8') as infile:
+                for line in infile:
+                    if args.limit and sequence_count >= args.limit:
+                        break
+                    line = line.strip()
+                    if line:
+                        tokens = line.split()
+                        # Remove <s> and </s> markers
+                        if tokens and tokens[0] == "<s>":
+                            tokens = tokens[1:]
+                        if tokens and tokens[-1] == "</s>":
+                            tokens = tokens[:-1]
+                        if tokens:
+                            chunk.append(tokens)
+                            sequence_count += 1
+                            
+                            # Process chunk when it reaches chunk_size
+                            if len(chunk) >= chunk_size:
+                                chunk_examples = create_line_level_dataset(
+                                    chunk, 
+                                    args.min_prefix_length, 
+                                    args.max_prefix_ratio,
+                                    args.examples_per_line
+                                )
+                                for previous_lines, prefix, suffix in chunk_examples:
+                                    example = {
+                                        "previous_lines": previous_lines,
+                                        "prefix": prefix,
+                                        "suffix": suffix
+                                    }
+                                    f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                                total_examples += len(chunk_examples)
+                                chunk = []  # Clear chunk
+                                
+                                if sequence_count % (chunk_size * 10) == 0:
+                                    print(f"    Processed {sequence_count} sequences ({total_examples:,} examples so far)...")
+                
+                # Process remaining chunk
+                if chunk:
+                    chunk_examples = create_line_level_dataset(
+                        chunk, 
+                        args.min_prefix_length, 
+                        args.max_prefix_ratio,
+                        args.examples_per_line
+                    )
+                    for previous_lines, prefix, suffix in chunk_examples:
+                        example = {
+                            "previous_lines": previous_lines,
+                            "prefix": prefix,
+                            "suffix": suffix
+                        }
+                        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                    total_examples += len(chunk_examples)
+            print(f"  Created {total_examples:,} line-level examples from {sequence_count} sequences -> {output_file}")
     
     print("\nDone!")
 
