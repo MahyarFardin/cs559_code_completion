@@ -434,7 +434,7 @@ def main():
     parser.add_argument("--vocab_sample_lines", type=int, default=None,
                         help="Sample N lines for vocabulary building (None = all)")
     parser.add_argument("--lazy_load", action="store_true", default=False,
-                        help="Use lazy loading for datasets (saves memory but slower)")
+                        help="Use lazy loading for datasets (saves memory but slower). Omit this flag to disable lazy loading.")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of data loading workers (0 = single process)")
     
