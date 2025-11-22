@@ -85,11 +85,12 @@ class Vocabulary:
 class TokenLevelDataset(Dataset):
     """Dataset for token-level code completion."""
     
-    def __init__(self, jsonl_file, vocab, max_length=256, lazy_load=True):
+    def __init__(self, jsonl_file, vocab, max_length=256, lazy_load=True, max_examples=None):
         self.vocab = vocab
         self.max_length = max_length
         self.jsonl_file = jsonl_file
         self.lazy_load = lazy_load
+        self.max_examples = max_examples
         
         if lazy_load:
             # Count lines without loading all data
@@ -98,18 +99,26 @@ class TokenLevelDataset(Dataset):
             with open(jsonl_file, 'r', encoding='utf-8') as f:
                 for _ in f:
                     self.num_examples += 1
+                    if max_examples and self.num_examples >= max_examples:
+                        break
                     if self.num_examples % 10000 == 0:
                         print(f"  Counted {self.num_examples} examples...")
+            if max_examples:
+                self.num_examples = min(self.num_examples, max_examples)
             print(f"Found {self.num_examples} examples (lazy loading enabled)")
             self.examples = None
         else:
-            # Load all examples into memory (original behavior)
+            # Load examples into memory (with optional limit)
             self.examples = []
             print(f"Loading {jsonl_file}...")
             with open(jsonl_file, 'r', encoding='utf-8') as f:
                 for line in f:
+                    if max_examples and len(self.examples) >= max_examples:
+                        break
                     example = json.loads(line)
                     self.examples.append(example)
+                    if len(self.examples) % 10000 == 0:
+                        print(f"  Loaded {len(self.examples)} examples...")
             print(f"Loaded {len(self.examples)} examples")
             self.num_examples = len(self.examples)
     
@@ -429,10 +438,14 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--max_length", type=int, default=256)
     parser.add_argument("--device", type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument("--vocab_min_freq", type=int, default=2,
-                        help="Minimum frequency for vocabulary tokens")
-    parser.add_argument("--vocab_sample_lines", type=int, default=None,
+    parser.add_argument("--vocab_min_freq", type=int, default=10,
+                        help="Minimum frequency for vocabulary tokens (higher = smaller vocab)")
+    parser.add_argument("--vocab_sample_lines", type=int, default=50000,
                         help="Sample N lines for vocabulary building (None = all)")
+    parser.add_argument("--max_train_examples", type=int, default=None,
+                        help="Limit number of training examples to load (for testing/smaller models)")
+    parser.add_argument("--max_val_examples", type=int, default=10000,
+                        help="Limit number of validation examples to load")
     parser.add_argument("--lazy_load", action="store_true", default=False,
                         help="Use lazy loading for datasets (saves memory but slower). Omit this flag to disable lazy loading.")
     parser.add_argument("--num_workers", type=int, default=4,
@@ -456,6 +469,12 @@ def main():
     config.vocab_size = vocab_size
     config.max_len = args.max_length
     
+    # Warn if vocab is very large
+    if vocab_size > 50000:
+        print(f"\nWARNING: Vocabulary size ({vocab_size:,}) is very large!")
+        print("Consider using --vocab_min_freq 10 or higher to reduce vocabulary size.")
+        print("Large vocabularies lead to very large models and slow training.\n")
+    
     # Save vocabulary
     vocab_path = 'vocab.json'
     with open(vocab_path, 'w') as f:
@@ -473,11 +492,11 @@ def main():
     if args.task == 'token':
         train_dataset = TokenLevelDataset(
             os.path.join(args.dataset_dir, "token_level", "train.jsonl"),
-            vocab, args.max_length, lazy_load=args.lazy_load
+            vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_train_examples
         )
         val_dataset = TokenLevelDataset(
             os.path.join(args.dataset_dir, "token_level", "dev.jsonl"),
-            vocab, args.max_length, lazy_load=args.lazy_load
+            vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_val_examples
         )
         
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
