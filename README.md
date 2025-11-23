@@ -46,6 +46,15 @@ cs559_code_completion/
    ```bash
    pip install torch tqdm numpy
    ```
+   
+   **Note:** For GPU support, install PyTorch with CUDA:
+   ```bash
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+   ```
+   Then install other dependencies:
+   ```bash
+   pip install tqdm numpy
+   ```
 
 2. **Download and extract the dataset:**
    ```bash
