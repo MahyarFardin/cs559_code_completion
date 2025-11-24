@@ -28,3 +28,8 @@ py150_files/
 token_completion/
 
 venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
