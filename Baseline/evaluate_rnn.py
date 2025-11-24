@@ -159,6 +159,9 @@ def main():
                         help="Number of RNN layers (must match training)")
     parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout rate used during training")
+    parser.add_argument("--max_test_examples", type=int, default=None,
+                        help="Limit number of test examples (for faster evaluation)")
+
 
     args = parser.parse_args()
 
@@ -193,7 +196,7 @@ def main():
             vocab,
             args.max_length,
             lazy_load=args.lazy_load,
-            max_examples=None,
+            max_examples=args.max_test_examples,
         )
         test_loader = DataLoader(
             test_dataset,
@@ -220,7 +223,7 @@ def main():
             args.max_length,
             max_suffix_length=args.max_suffix_length,
             lazy_load=args.lazy_load,
-            max_examples=None,
+            max_examples=args.max_test_examples,
         )
         test_loader = DataLoader(
             test_dataset,
