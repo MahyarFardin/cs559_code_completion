@@ -188,8 +188,30 @@ def main():
         print(f"Total Examples: {results['total_examples']:,}")
         print("="*50)
     
+    # Determine output directory based on model path
+    # If model is in a runs directory, save results there
+    model_dir = os.path.dirname(os.path.abspath(args.model_path))
+    if 'runs' in model_dir:
+        # Model is in a run directory, save results there
+        output_dir = model_dir
+    else:
+        # Model is not in a run directory, create a results directory based on model name
+        model_name = os.path.basename(args.model_path).replace('.pt', '')
+        output_dir = os.path.join('runs', f'eval_{model_name}')
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Add evaluation parameters to results
+    results['evaluation_params'] = {
+        'model_path': args.model_path,
+        'task': args.task,
+        'max_length': args.max_length,
+        'batch_size': args.batch_size,
+        'max_test_examples': args.max_test_examples,
+        'device': args.device
+    }
+    
     # Save results
-    results_file = args.model_path.replace('.pt', '_test_results.json')
+    results_file = os.path.join(output_dir, 'test_results.json')
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {results_file}")

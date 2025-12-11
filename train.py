@@ -13,6 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from collections import Counter
 from tqdm import tqdm
 import numpy as np
+from datetime import datetime
 
 from model import CodeCompletionTransformer, ModelConfig
 
@@ -276,13 +277,14 @@ def collate_line_level(batch):
         'suffix_ids': suffix_ids
     }
 
-def train_token_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda'):
+def train_token_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda', output_dir='.'):
     """Train model for token-level completion."""
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
     
     best_val_loss = float('inf')
+    model_path = os.path.join(output_dir, 'best_model_token_level.pt')
     
     for epoch in range(num_epochs):
         # Training
@@ -337,16 +339,17 @@ def train_token_level(model, train_loader, val_loader, config, num_epochs=10, de
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model_token_level.pt')
-            print(f"Saved best model (val_loss: {avg_val_loss:.4f})")
+            torch.save(model.state_dict(), model_path)
+            print(f"Saved best model to {model_path} (val_loss: {avg_val_loss:.4f})")
 
-def train_line_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda'):
+def train_line_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda', output_dir='.'):
     """Train model for line-level completion."""
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
     
     best_val_loss = float('inf')
+    model_path = os.path.join(output_dir, 'best_model_line_level.pt')
     
     for epoch in range(num_epochs):
         # Training
@@ -432,8 +435,8 @@ def train_line_level(model, train_loader, val_loader, config, num_epochs=10, dev
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model_line_level.pt')
-            print(f"Saved best model (val_loss: {avg_val_loss:.4f})")
+            torch.save(model.state_dict(), model_path)
+            print(f"Saved best model to {model_path} (val_loss: {avg_val_loss:.4f})")
 
 def main():
     parser = argparse.ArgumentParser(description="Train code completion model")
@@ -464,6 +467,24 @@ def main():
     
     print(f"Using device: {args.device}")
     
+    # Create run directory based on parameters
+    run_name = f"run_{args.task}_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    if args.max_train_examples:
+        run_name += f"_train{args.max_train_examples}"
+    if args.max_val_examples and args.max_val_examples != 10000:
+        run_name += f"_val{args.max_val_examples}"
+    run_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    output_dir = os.path.join('runs', run_name)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\nRun directory: {output_dir}")
+    
+    # Save training parameters to run directory
+    params_file = os.path.join(output_dir, 'training_params.json')
+    with open(params_file, 'w') as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Saved training parameters to {params_file}")
+    
     # Build vocabulary from tokenized files
     vocab = Vocabulary()
     vocab_files = [
@@ -484,8 +505,8 @@ def main():
         print("Consider using --vocab_min_freq 10 or higher to reduce vocabulary size.")
         print("Large vocabularies lead to very large models and slow training.\n")
     
-    # Save vocabulary
-    vocab_path = 'vocab.json'
+    # Save vocabulary to run directory
+    vocab_path = os.path.join(output_dir, 'vocab.json')
     with open(vocab_path, 'w') as f:
         json.dump({
             'token_to_idx': vocab.token_to_idx,
@@ -516,7 +537,7 @@ def main():
                                num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         
         train_token_level(model, train_loader, val_loader, config, 
-                         args.num_epochs, args.device)
+                         args.num_epochs, args.device, output_dir)
     
     else:  # line-level
         train_dataset = LineLevelDataset(
@@ -536,9 +557,9 @@ def main():
                                num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         
         train_line_level(model, train_loader, val_loader, config, 
-                        args.num_epochs, args.device)
+                        args.num_epochs, args.device, output_dir)
     
-    print("Training complete!")
+    print(f"\nTraining complete! All outputs saved to: {output_dir}")
 
 if __name__ == "__main__":
     main()

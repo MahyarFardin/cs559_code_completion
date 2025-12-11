@@ -33,6 +33,12 @@ cs559_code_completion/
 └── completion_datasets/          # Code completion datasets (generated)
     ├── token_level/              # Next token prediction datasets
     └── line_level/               # Line completion datasets
+└── runs/                         # Training run directories (generated)
+    └── run_*/                    # Individual run directories named by parameters
+        ├── best_model_*.pt       # Model checkpoint
+        ├── vocab.json            # Vocabulary file
+        ├── training_params.json  # Training parameters
+        └── test_results.json    # Evaluation results (after running evaluate.py)
 ```
 
 ## Setup
@@ -142,16 +148,22 @@ The `create_completion_datasets.py` script creates task-specific datasets:
 - `--batch_size`: Batch size (default: 32)
 - `--num_epochs`: Number of training epochs (default: 10)
 - `--max_length`: Maximum sequence length (default: 256)
-- `--vocab_min_freq`: Minimum token frequency for vocabulary (default: 2)
+- `--vocab_min_freq`: Minimum token frequency for vocabulary (default: 10)
 - `--vocab_sample_lines`: Sample N lines for vocabulary building (None = all, use to save memory)
 - `--lazy_load`: Use lazy loading for datasets (default: True, saves memory)
 - `--device`: `cuda` or `cpu` (auto-detected)
 
 ### Output Files
 
-Training creates:
-- `vocab.json` - Vocabulary mapping (tokens ↔ indices)
+Training creates a run directory in `runs/` named after the training parameters:
+- Directory name format: `run_{task}_bs{batch_size}_ep{epochs}_len{max_length}_vocab{min_freq}_{timestamp}`
+- Example: `runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/`
+
+Each run directory contains:
 - `best_model_token_level.pt` or `best_model_line_level.pt` - Best model checkpoint
+- `vocab.json` - Vocabulary mapping (tokens ↔ indices)
+- `training_params.json` - All training parameters used for this run
+- `test_results.json` - Evaluation results (created after running `evaluate.py`)
 
 ## Inference
 
@@ -161,8 +173,8 @@ Predict the next token:
 
 ```bash
 python inference.py \
-    --model_path best_model_token_level.pt \
-    --vocab_path vocab.json \
+    --model_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/best_model_token_level.pt \
+    --vocab_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/vocab.json \
     --task token \
     --context "from bootstrap import" \
     --top_k 5
@@ -174,12 +186,42 @@ Complete a line:
 
 ```bash
 python inference.py \
-    --model_path best_model_line_level.pt \
-    --vocab_path vocab.json \
+    --model_path runs/run_line_bs32_ep10_len256_vocab10_20240101_120000/best_model_line_level.pt \
+    --vocab_path runs/run_line_bs32_ep10_len256_vocab10_20240101_120000/vocab.json \
     --task line \
     --context "def hello(name):" \
     --device cuda
 ```
+
+## Evaluation
+
+Evaluate a trained model on the test set:
+
+```bash
+python evaluate.py \
+    --model_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/best_model_token_level.pt \
+    --vocab_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/vocab.json \
+    --task token \
+    --dataset_dir completion_datasets \
+    --batch_size 32 \
+    --device cuda
+```
+
+The evaluation script will:
+- Automatically detect if the model is in a `runs/` directory
+- Save `test_results.json` to the same run directory
+- Include evaluation metrics (loss, accuracy) and evaluation parameters in the results file
+
+### Evaluation Options
+
+- `--model_path`: Path to trained model checkpoint (required)
+- `--vocab_path`: Path to vocabulary file (default: `vocab.json`)
+- `--task`: `token` or `line` (default: `token`)
+- `--dataset_dir`: Directory containing test datasets (default: `completion_datasets`)
+- `--max_length`: Maximum sequence length (default: 256)
+- `--batch_size`: Batch size for evaluation (default: 32)
+- `--max_test_examples`: Limit number of test examples (None = all)
+- `--device`: `cuda` or `cpu` (auto-detected)
 
 
 ### Data Flow
@@ -195,8 +237,14 @@ python inference.py \
    - Builds vocabulary from tokenized files
    - Converts tokens to indices
    - Trains model with PyTorch DataLoader
+   - Creates run directory with model, vocabulary, and training parameters
 
-4. **Inference** (`inference.py`)
+4. **Evaluation** (`evaluate.py`)
+   - Loads trained model and vocabulary
+   - Evaluates on test set
+   - Saves results to run directory
+
+5. **Inference** (`inference.py`)
    - Loads trained model and vocabulary
    - Converts input tokens to indices
    - Generates predictions
@@ -209,9 +257,10 @@ from train import Vocabulary
 import torch
 import json
 
-# Load vocabulary
+# Load vocabulary from run directory
+run_dir = 'runs/run_token_bs32_ep10_len256_vocab10_20240101_120000'
 vocab = Vocabulary()
-with open('vocab.json', 'r') as f:
+with open(f'{run_dir}/vocab.json', 'r') as f:
     vocab_data = json.load(f)
     vocab.token_to_idx = vocab_data['token_to_idx']
     vocab.idx_to_token = {int(k): v for k, v in vocab_data['idx_to_token'].items()}
@@ -220,7 +269,7 @@ with open('vocab.json', 'r') as f:
 config = ModelConfig()
 config.vocab_size = len(vocab.token_to_idx)
 model = CodeCompletionTransformer(config)
-model.load_state_dict(torch.load('best_model_token_level.pt'))
+model.load_state_dict(torch.load(f'{run_dir}/best_model_token_level.pt'))
 model.eval()
 
 # Predict
