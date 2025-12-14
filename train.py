@@ -13,6 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from collections import Counter
 from tqdm import tqdm
 import numpy as np
+from datetime import datetime
 
 from model import CodeCompletionTransformer, ModelConfig
 
@@ -276,13 +277,14 @@ def collate_line_level(batch):
         'suffix_ids': suffix_ids
     }
 
-def train_token_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda'):
+def train_token_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda', output_dir='.'):
     """Train model for token-level completion."""
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
     
     best_val_loss = float('inf')
+    model_path = os.path.join(output_dir, 'best_model_token_level.pt')
     
     for epoch in range(num_epochs):
         # Training
@@ -337,103 +339,175 @@ def train_token_level(model, train_loader, val_loader, config, num_epochs=10, de
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model_token_level.pt')
-            print(f"Saved best model (val_loss: {avg_val_loss:.4f})")
+            torch.save(model.state_dict(), model_path)
+            print(f"Saved best model to {model_path} (val_loss: {avg_val_loss:.4f})")
 
-def train_line_level(model, train_loader, val_loader, config, num_epochs=10, device='cuda'):
-    """Train model for line-level completion."""
+def train_line_level(model, train_loader, val_loader, config,
+                     num_epochs=10, device='cuda', output_dir='.'):
+    """
+    Train a model for line-level code completion using teacher forcing.
+
+    At each step, the model predicts the next suffix token given:
+      (context tokens) + (previous ground-truth suffix tokens)
+
+    The context grows token-by-token (ground truth) and is truncated to config.max_len.
+    Loss is computed only on non-padding targets.
+    """
+
+    # Move model to device (GPU/CPU)
     model = model.to(device)
+
+    # Optimizer and loss (PAD tokens are ignored)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
-    
+    pad_idx = 0
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+
+    # Enable mixed precision on CUDA if available
+    use_amp = (str(device).startswith("cuda") and torch.cuda.is_available())
+    try:
+        from torch import amp
+        scaler = amp.GradScaler('cuda', enabled=use_amp)
+        autocast = lambda: amp.autocast(device_type='cuda', enabled=use_amp)
+    except Exception:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        autocast = lambda: torch.cuda.amp.autocast(enabled=use_amp)
+
     best_val_loss = float('inf')
-    
+    model_path = os.path.join(output_dir, 'best_model_line_level.pt')
+
     for epoch in range(num_epochs):
-        # Training
+        #################
+        # Training loop
+        #################
         model.train()
-        train_loss = 0
+        train_loss = 0.0
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
-        
+
         for batch in train_pbar:
-            context_ids = batch['context_ids'].to(device)
-            suffix_ids = batch['suffix_ids'].to(device)
-            
-            # Forward pass on context
-            logits = model(context_ids)  # [B, T, vocab_size]
-            
-            # Predict suffix tokens sequentially
-            # For simplicity, we predict each suffix token given context + previous suffix tokens
-            total_loss = 0
-            batch_size = context_ids.size(0)
-            
-            # Start with context, then append suffix tokens one by one
+            # Batch contains padded context and padded suffix
+            context_ids = batch['context_ids'].to(device)  # [B, max_context_len]
+            suffix_ids  = batch['suffix_ids'].to(device)   # [B, max_suffix_len]
+
+            # We predict suffix tokens (excluding the last position, which has no "next" token)
+            steps = suffix_ids.size(1) - 1
+            if steps <= 0:
+                continue
+
+            # Count how many non-pad target tokens exist in this batch
+            # (used to compute a mean loss over real tokens)
+            target_block = suffix_ids[:, :steps]
+            total_valid_tokens = (target_block != pad_idx).sum().item()
+            if total_valid_tokens == 0:
+                continue
+
+            # Reset gradients
+            optimizer.zero_grad(set_to_none=True)
+
+            # Start input as the (padded) context; we will append ground-truth suffix tokens step-by-step
             current_input = context_ids
-            for i in range(suffix_ids.size(1) - 1):
-                # Get logits for next token
-                logits = model(current_input)
-                next_logits = logits[:, -1, :]  # [B, vocab_size]
-                next_target = suffix_ids[:, i]  # [B]
-                
-                # Compute loss
-                loss = criterion(next_logits, next_target)
-                total_loss += loss
-                
-                # Append predicted token to input for next step
-                next_token = suffix_ids[:, i:i+1]  # [B, 1]
+            batch_loss_value = 0.0
+
+            for i in range(steps):
+                # Target token at this step
+                next_target = suffix_ids[:, i]          # [B]
+                mask = (next_target != pad_idx)         # only compute loss where target is not PAD
+
+                # If every target is PAD at this step, there is nothing to predict beyond this point
+                if not mask.any():
+                    break
+
+                # Forward pass (optionally in mixed precision)
+                with autocast():
+                    logits = model(current_input)       # [B, T, vocab]
+                    next_logits = logits[:, -1, :]      # [B, vocab] -> prediction for next token
+
+                    # Compute loss only on valid (non-pad) targets
+                    loss_step = criterion(next_logits[mask], next_target[mask])
+
+                    # Weight this step's contribution proportional to how many valid targets it has,
+                    # so the total loss is effectively an average per valid target token.
+                    valid_here = mask.sum().item()
+                    loss_scaled = loss_step * (valid_here / total_valid_tokens)
+
+                # Backpropagate this step's contribution
+                scaler.scale(loss_scaled).backward()
+                batch_loss_value += float(loss_scaled.item())
+
+                # Teacher forcing: append the ground-truth token for the next prediction step
+                next_token = suffix_ids[:, i:i+1]       # [B, 1]
                 current_input = torch.cat([current_input, next_token], dim=1)
-                # Truncate if too long
+
+                # Keep only the most recent config.max_len tokens
                 if current_input.size(1) > config.max_len:
                     current_input = current_input[:, -config.max_len:]
-            
-            avg_loss = total_loss / (suffix_ids.size(1) - 1)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            avg_loss.backward()
+
+            # Apply gradient clipping and optimizer step
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            
-            train_loss += avg_loss.item()
-            train_pbar.set_postfix({'loss': avg_loss.item()})
-        
-        avg_train_loss = train_loss / len(train_loader)
-        
-        # Validation (similar to training)
+            scaler.step(optimizer)
+            scaler.update()
+
+            train_loss += batch_loss_value
+            train_pbar.set_postfix({'loss': batch_loss_value})
+
+        avg_train_loss = train_loss / max(1, len(train_loader))
+
+        #################
+        # Validation loop
+        #################
         model.eval()
-        val_loss = 0
+        val_loss = 0.0
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
             for batch in val_pbar:
                 context_ids = batch['context_ids'].to(device)
-                suffix_ids = batch['suffix_ids'].to(device)
-                
+                suffix_ids  = batch['suffix_ids'].to(device)
+
+                steps = suffix_ids.size(1) - 1
+                if steps <= 0:
+                    continue
+
+                target_block = suffix_ids[:, :steps]
+                total_valid_tokens = (target_block != pad_idx).sum().item()
+                if total_valid_tokens == 0:
+                    continue
+
                 current_input = context_ids
-                total_loss = 0
-                for i in range(suffix_ids.size(1) - 1):
-                    logits = model(current_input)
-                    next_logits = logits[:, -1, :]
+                batch_loss_value = 0.0
+
+                for i in range(steps):
                     next_target = suffix_ids[:, i]
-                    loss = criterion(next_logits, next_target)
-                    total_loss += loss
-                    
+                    mask = (next_target != pad_idx)
+                    if not mask.any():
+                        break
+
+                    with autocast():
+                        logits = model(current_input)
+                        next_logits = logits[:, -1, :]
+                        loss_step = criterion(next_logits[mask], next_target[mask])
+
+                        valid_here = mask.sum().item()
+                        loss_scaled = loss_step * (valid_here / total_valid_tokens)
+
+                    batch_loss_value += float(loss_scaled.item())
+
                     next_token = suffix_ids[:, i:i+1]
                     current_input = torch.cat([current_input, next_token], dim=1)
                     if current_input.size(1) > config.max_len:
                         current_input = current_input[:, -config.max_len:]
-                
-                avg_loss = total_loss / (suffix_ids.size(1) - 1)
-                val_loss += avg_loss.item()
-                val_pbar.set_postfix({'loss': avg_loss.item()})
-        
-        avg_val_loss = val_loss / len(val_loader)
-        
+
+                val_loss += batch_loss_value
+                val_pbar.set_postfix({'loss': batch_loss_value})
+
+        avg_val_loss = val_loss / max(1, len(val_loader))
+
         print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
-        
-        # Save best model
+
+        # Save best checkpoint by validation loss
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model_line_level.pt')
-            print(f"Saved best model (val_loss: {avg_val_loss:.4f})")
+            torch.save(model.state_dict(), model_path)
+            print(f"Saved best model to {model_path} (val_loss: {avg_val_loss:.4f})")
 
 def main():
     parser = argparse.ArgumentParser(description="Train code completion model")
@@ -464,6 +538,24 @@ def main():
     
     print(f"Using device: {args.device}")
     
+    # Create run directory based on parameters
+    run_name = f"run_{args.task}_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    if args.max_train_examples:
+        run_name += f"_train{args.max_train_examples}"
+    if args.max_val_examples and args.max_val_examples != 10000:
+        run_name += f"_val{args.max_val_examples}"
+    run_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    output_dir = os.path.join('runs', run_name)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\nRun directory: {output_dir}")
+    
+    # Save training parameters to run directory
+    params_file = os.path.join(output_dir, 'training_params.json')
+    with open(params_file, 'w') as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Saved training parameters to {params_file}")
+    
     # Build vocabulary from tokenized files
     vocab = Vocabulary()
     vocab_files = [
@@ -484,8 +576,8 @@ def main():
         print("Consider using --vocab_min_freq 10 or higher to reduce vocabulary size.")
         print("Large vocabularies lead to very large models and slow training.\n")
     
-    # Save vocabulary
-    vocab_path = 'vocab.json'
+    # Save vocabulary to run directory
+    vocab_path = os.path.join(output_dir, 'vocab.json')
     with open(vocab_path, 'w') as f:
         json.dump({
             'token_to_idx': vocab.token_to_idx,
@@ -516,7 +608,7 @@ def main():
                                num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         
         train_token_level(model, train_loader, val_loader, config, 
-                         args.num_epochs, args.device)
+                         args.num_epochs, args.device, output_dir)
     
     else:  # line-level
         train_dataset = LineLevelDataset(
@@ -536,9 +628,9 @@ def main():
                                num_workers=args.num_workers, pin_memory=True if args.device == 'cuda' else False)
         
         train_line_level(model, train_loader, val_loader, config, 
-                        args.num_epochs, args.device)
+                        args.num_epochs, args.device, output_dir)
     
-    print("Training complete!")
+    print(f"\nTraining complete! All outputs saved to: {output_dir}")
 
 if __name__ == "__main__":
     main()
