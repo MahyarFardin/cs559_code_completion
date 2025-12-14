@@ -23,6 +23,8 @@ TestResults.xml
 
 #DatasetJSON
 py150_files/
+completion_datasets/
+runs/
 
 #Preprocessed tokenized datasets (too large for git)
 token_completion/
