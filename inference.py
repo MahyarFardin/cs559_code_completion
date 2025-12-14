@@ -6,10 +6,11 @@ Inference script for code completion model.
 import torch
 import argparse
 import json
+import os
 from train import Vocabulary
 from model import CodeCompletionTransformer, ModelConfig
 
-def load_model(model_path, vocab_path, config, device='cuda'):
+def load_model(model_path, vocab_path, config=None, device='cuda'):
     """Load trained model and vocabulary."""
     # Load vocabulary
     vocab = Vocabulary()
@@ -18,13 +19,18 @@ def load_model(model_path, vocab_path, config, device='cuda'):
         vocab.token_to_idx = vocab_data['token_to_idx']
         vocab.idx_to_token = {int(k): v for k, v in vocab_data['idx_to_token'].items()}
     
-    # Create model
+    # If config not provided, create one matching the vocabulary
+    if config is None:
+        config = ModelConfig()
+        config.vocab_size = len(vocab.token_to_idx)
+    
+    # Create model with correct configuration
     model = CodeCompletionTransformer(config)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
     model.eval()
     
-    return model, vocab
+    return model, vocab, config
 
 def predict_next_token(model, vocab, context_tokens, device='cuda', top_k=5):
     """Predict next token given context."""
@@ -86,12 +92,32 @@ def main():
     
     args = parser.parse_args()
     
-    # Load config (you may need to adjust this based on your training config)
+    # Try to load training parameters from run directory
+    model_dir = os.path.dirname(os.path.abspath(args.model_path))
+    training_params_path = os.path.join(model_dir, 'training_params.json')
+    
     config = ModelConfig()
+    
+    # If training parameters exist, use them to set max_length
+    if os.path.exists(training_params_path):
+        print(f"Loading training parameters from {training_params_path}...")
+        with open(training_params_path, 'r') as f:
+            training_params = json.load(f)
+        if 'max_length' in training_params:
+            config.max_len = training_params['max_length']
+            print(f"Using max_length={config.max_len} from training parameters")
+    
+    # Load vocabulary to get actual vocab size
+    with open(args.vocab_path, 'r') as f:
+        vocab_data = json.load(f)
+    
+    # Set vocab_size from actual vocabulary
+    config.vocab_size = len(vocab_data['token_to_idx'])
+    print(f"Using vocab_size={config.vocab_size} from vocabulary file")
     
     # Load model and vocabulary
     print("Loading model...")
-    model, vocab = load_model(args.model_path, args.vocab_path, config, args.device)
+    model, vocab, config = load_model(args.model_path, args.vocab_path, config, args.device)
     print("Model loaded!")
     
     # Parse context
