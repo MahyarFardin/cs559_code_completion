@@ -111,6 +111,10 @@ def main():
                         help="Batch size for evaluation")
     parser.add_argument("--max_test_examples", type=int, default=None,
                         help="Limit number of test examples (None = all)")
+    parser.add_argument("--lazy_load", action="store_true", default=True,
+                        help="Use lazy loading for test dataset (saves memory, recommended)")
+    parser.add_argument("--no_lazy_load", dest="lazy_load", action="store_false",
+                        help="Disable lazy loading (loads all examples into memory)")
     parser.add_argument("--device", type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of data loading workers")
@@ -146,10 +150,15 @@ def main():
     
     # Create test dataset
     print("Loading test dataset...")
+    if args.lazy_load:
+        print("Using lazy loading (memory efficient)")
+    else:
+        print("Loading all examples into memory (may be slow for large datasets)")
+    
     if args.task == 'token':
         test_dataset = TokenLevelDataset(
             os.path.join(args.dataset_dir, "token_level", "test.jsonl"),
-            vocab, args.max_length, lazy_load=False, max_examples=args.max_test_examples
+            vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_test_examples
         )
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, 
                                shuffle=False, collate_fn=collate_token_level,
@@ -170,7 +179,7 @@ def main():
     else:  # line-level
         test_dataset = LineLevelDataset(
             os.path.join(args.dataset_dir, "line_level", "test.jsonl"),
-            vocab, args.max_length, max_suffix_length=64, lazy_load=False, 
+            vocab, args.max_length, max_suffix_length=64, lazy_load=args.lazy_load, 
             max_examples=args.max_test_examples
         )
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, 
