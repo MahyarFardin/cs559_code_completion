@@ -99,6 +99,8 @@ def train_token_level(model, train_loader, val_loader, config, num_epochs=10, de
 
 def main():
     parser = argparse.ArgumentParser(description="Train token-level code completion model with gradient accumulation")
+    parser.add_argument("--task", type=str, default="token", choices=['token'],
+                        help="Task type (always token for this script)")
     parser.add_argument("--dataset_dir", type=str, default="completion_datasets",
                         help="Directory containing completion datasets")
     parser.add_argument("--tokenized_dir", type=str, default="token_completion",
