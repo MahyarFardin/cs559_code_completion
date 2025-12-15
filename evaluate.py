@@ -123,16 +123,16 @@ def main():
     
     print(f"Using device: {args.device}")
     
-    # Auto-detect vocab from run directory if model is in runs/ directory
+    # Auto-detect vocab and training params from model directory
     model_dir = os.path.dirname(os.path.abspath(args.model_path))
-    if 'runs' in model_dir and args.vocab_path == "vocab.json":
-        # Model is in a run directory, try to use vocab from same directory
-        run_vocab_path = os.path.join(model_dir, 'vocab.json')
-        if os.path.exists(run_vocab_path):
-            args.vocab_path = run_vocab_path
-            print(f"Auto-detected vocab from run directory: {args.vocab_path}")
-        else:
-            print(f"Warning: vocab.json not found in {model_dir}, using default")
+    
+    # Always prefer vocab.json in the same directory as the model (if it exists)
+    run_vocab_path = os.path.join(model_dir, 'vocab.json')
+    if os.path.exists(run_vocab_path):
+        args.vocab_path = run_vocab_path
+        print(f"Using vocab from model directory: {args.vocab_path}")
+    elif args.vocab_path == "vocab.json":
+        print(f"Using default vocab.json (not found in {model_dir})")
     
     # Try to load training parameters for max_length if in run directory
     training_params_path = os.path.join(model_dir, 'training_params.json')
