@@ -177,8 +177,111 @@ def collate_token_level(batch):
     }
 
 
-def train_epoch(model, train_loader, optimizer, criterion, device, accumulation_steps=1):
-    """Train for one epoch."""
+class LineLevelDataset(Dataset):
+    """Dataset for line-level code completion."""
+    
+    def __init__(self, jsonl_file, vocab, max_context_length=256, max_suffix_length=64, lazy_load=True, max_examples=None):
+        self.vocab = vocab
+        self.max_context_length = max_context_length
+        self.max_suffix_length = max_suffix_length
+        self.jsonl_file = jsonl_file
+        self.lazy_load = lazy_load
+        self.max_examples = max_examples
+        
+        if lazy_load:
+            # Count lines without loading all data
+            print(f"Counting examples in {jsonl_file}...")
+            self.num_examples = 0
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                for _ in f:
+                    self.num_examples += 1
+                    if max_examples and self.num_examples >= max_examples:
+                        break
+                    if self.num_examples % 10000 == 0:
+                        print(f"  Counted {self.num_examples} examples...")
+            if max_examples:
+                self.num_examples = min(self.num_examples, max_examples)
+            print(f"Found {self.num_examples} examples (lazy loading enabled)")
+            self.examples = None
+        else:
+            # Load examples into memory
+            self.examples = []
+            print(f"Loading {jsonl_file}...")
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if max_examples and len(self.examples) >= max_examples:
+                        break
+                    example = json.loads(line)
+                    self.examples.append(example)
+                    if len(self.examples) % 10000 == 0:
+                        print(f"  Loaded {len(self.examples)} examples...")
+            print(f"Loaded {len(self.examples)} examples")
+            self.num_examples = len(self.examples)
+    
+    def __len__(self):
+        return self.num_examples
+    
+    def __getitem__(self, idx):
+        if self.lazy_load:
+            # Use seek-based access for faster random access
+            if not hasattr(self, '_file_positions'):
+                # Build position cache on first access
+                self._file_positions = []
+                with open(self.jsonl_file, 'rb') as f:
+                    pos = 0
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            break
+                        self._file_positions.append(pos)
+                        pos = f.tell()
+            
+            # Seek to position and read line
+            with open(self.jsonl_file, 'r', encoding='utf-8') as f:
+                f.seek(self._file_positions[idx])
+                line = f.readline()
+                example = json.loads(line)
+        else:
+            example = self.examples[idx]
+        
+        previous_lines = example['previous_lines'].split() if example['previous_lines'] else []
+        prefix = example['prefix'].split()
+        suffix = example['suffix'].split()
+        
+        # Combine context: previous_lines + prefix
+        context = previous_lines + ['<EOL>'] + prefix if previous_lines else prefix
+        
+        # Truncate if needed
+        if len(context) > self.max_context_length:
+            context = context[-self.max_context_length:]
+        
+        if len(suffix) > self.max_suffix_length:
+            suffix = suffix[:self.max_suffix_length]
+        
+        # Encode
+        context_ids = self.vocab.encode(context, max_length=self.max_context_length, pad=True)
+        suffix_ids = self.vocab.encode(suffix, max_length=self.max_suffix_length, pad=True)
+        
+        return {
+            'context_ids': torch.tensor(context_ids, dtype=torch.long),
+            'suffix_ids': torch.tensor(suffix_ids, dtype=torch.long),
+            'context_length': len(context),
+            'suffix_length': len(suffix)
+        }
+
+
+def collate_line_level(batch):
+    """Collate function for line-level dataset."""
+    context_ids = torch.stack([item['context_ids'] for item in batch])
+    suffix_ids = torch.stack([item['suffix_ids'] for item in batch])
+    return {
+        'context_ids': context_ids,
+        'suffix_ids': suffix_ids
+    }
+
+
+def train_epoch_token(model, train_loader, optimizer, criterion, device, accumulation_steps=1):
+    """Train for one epoch (token-level)."""
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -224,8 +327,88 @@ def train_epoch(model, train_loader, optimizer, criterion, device, accumulation_
     return avg_loss
 
 
-def validate(model, val_loader, criterion, device):
-    """Validate the model."""
+def train_epoch_line(model, train_loader, optimizer, criterion, config, device, accumulation_steps=1):
+    """Train for one epoch (line-level)."""
+    model.train()
+    total_loss = 0.0
+    num_batches = 0
+    pad_idx = 0
+    
+    optimizer.zero_grad()
+    
+    pbar = tqdm(train_loader, desc="Training")
+    for batch_idx, batch in enumerate(pbar):
+        context_ids = batch['context_ids'].to(device)  # [B, max_context_len]
+        suffix_ids = batch['suffix_ids'].to(device)   # [B, max_suffix_len]
+        
+        # Predict suffix tokens sequentially
+        steps = suffix_ids.size(1) - 1
+        if steps <= 0:
+            continue
+        
+        # Count valid (non-pad) tokens
+        target_block = suffix_ids[:, :steps]
+        total_valid_tokens = (target_block != pad_idx).sum().item()
+        if total_valid_tokens == 0:
+            continue
+        
+        # Start with context, append suffix tokens step-by-step
+        current_input = context_ids
+        batch_loss_value = 0.0
+        
+        for i in range(steps):
+            next_target = suffix_ids[:, i]  # [B]
+            mask = (next_target != pad_idx)
+            
+            if not mask.any():
+                break
+            
+            # Forward pass
+            logits = model(current_input)  # [B, T, vocab]
+            next_logits = logits[:, -1, :]  # [B, vocab]
+            
+            # Compute loss only on valid targets
+            loss_step = criterion(next_logits[mask], next_target[mask])
+            
+            # Weight by number of valid tokens
+            valid_here = mask.sum().item()
+            loss_scaled = loss_step * (valid_here / total_valid_tokens) / accumulation_steps
+            
+            # Backward pass
+            loss_scaled.backward()
+            batch_loss_value += float(loss_scaled.item() * accumulation_steps)
+            
+            # Teacher forcing: append ground-truth token
+            next_token = suffix_ids[:, i:i+1]  # [B, 1]
+            current_input = torch.cat([current_input, next_token], dim=1)
+            
+            # Truncate if too long
+            if current_input.size(1) > config.max_len:
+                current_input = current_input[:, -config.max_len:]
+        
+        total_loss += batch_loss_value
+        num_batches += 1
+        
+        # Update weights every N batches
+        if (batch_idx + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+        
+        pbar.set_postfix({'loss': batch_loss_value})
+    
+    # Handle remaining gradients
+    if len(train_loader) % accumulation_steps != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        optimizer.zero_grad()
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    return avg_loss
+
+
+def validate_token(model, val_loader, criterion, device):
+    """Validate the model (token-level)."""
     model.eval()
     total_loss = 0.0
     total_correct = 0
@@ -259,6 +442,60 @@ def validate(model, val_loader, criterion, device):
     return avg_loss, accuracy
 
 
+def validate_line(model, val_loader, criterion, config, device):
+    """Validate the model (line-level)."""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    pad_idx = 0
+    
+    with torch.no_grad():
+        pbar = tqdm(val_loader, desc="Validation")
+        for batch in pbar:
+            context_ids = batch['context_ids'].to(device)
+            suffix_ids = batch['suffix_ids'].to(device)
+            
+            steps = suffix_ids.size(1) - 1
+            if steps <= 0:
+                continue
+            
+            target_block = suffix_ids[:, :steps]
+            total_valid_tokens = (target_block != pad_idx).sum().item()
+            if total_valid_tokens == 0:
+                continue
+            
+            current_input = context_ids
+            batch_loss_value = 0.0
+            
+            for i in range(steps):
+                next_target = suffix_ids[:, i]
+                mask = (next_target != pad_idx)
+                
+                if not mask.any():
+                    break
+                
+                logits = model(current_input)
+                next_logits = logits[:, -1, :]
+                loss_step = criterion(next_logits[mask], next_target[mask])
+                
+                valid_here = mask.sum().item()
+                loss_scaled = loss_step * (valid_here / total_valid_tokens)
+                batch_loss_value += float(loss_scaled.item())
+                
+                next_token = suffix_ids[:, i:i+1]
+                current_input = torch.cat([current_input, next_token], dim=1)
+                if current_input.size(1) > config.max_len:
+                    current_input = current_input[:, -config.max_len:]
+            
+            total_loss += batch_loss_value
+            num_batches += 1
+            pbar.set_postfix({'loss': batch_loss_value})
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    # Line-level doesn't have a simple accuracy metric
+    return avg_loss, None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train code completion transformer model")
     
@@ -267,6 +504,8 @@ def main():
                         help="Directory containing completion datasets")
     parser.add_argument("--tokenized_dir", type=str, default="token_completion",
                         help="Directory with tokenized files for vocabulary building")
+    parser.add_argument("--task", type=str, choices=['token', 'line'], default='token',
+                        help="Task type: token-level or line-level")
     
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=32,
@@ -274,7 +513,9 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=10,
                         help="Number of training epochs")
     parser.add_argument("--max_length", type=int, default=256,
-                        help="Maximum sequence length")
+                        help="Maximum sequence length (context length for line-level)")
+    parser.add_argument("--max_suffix_length", type=int, default=64,
+                        help="Maximum suffix length for line-level task")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                         help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01,
@@ -314,6 +555,7 @@ def main():
     print("="*60)
     print("CODE COMPLETION TRANSFORMER TRAINING")
     print("="*60)
+    print(f"Task: {args.task}-level")
     print(f"Device: {args.device}")
     print(f"Batch size: {args.batch_size}")
     print(f"Gradient accumulation steps: {args.accumulation_steps}")
@@ -324,7 +566,7 @@ def main():
     print()
     
     # Create run directory
-    run_name = f"run_v2_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    run_name = f"run_{args.task}_v2_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
     if args.max_train_examples:
         run_name += f"_train{args.max_train_examples}"
     if args.accumulation_steps > 1:
@@ -377,14 +619,28 @@ def main():
     print(f"Model size: {param_count * 4 / 1024 / 1024:.2f} MB (float32)\n")
     
     # Create datasets
-    train_dataset = TokenLevelDataset(
-        os.path.join(args.dataset_dir, "token_level", "train.jsonl"),
-        vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_train_examples
-    )
-    val_dataset = TokenLevelDataset(
-        os.path.join(args.dataset_dir, "token_level", "dev.jsonl"),
-        vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_val_examples
-    )
+    if args.task == 'token':
+        train_dataset = TokenLevelDataset(
+            os.path.join(args.dataset_dir, "token_level", "train.jsonl"),
+            vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_train_examples
+        )
+        val_dataset = TokenLevelDataset(
+            os.path.join(args.dataset_dir, "token_level", "dev.jsonl"),
+            vocab, args.max_length, lazy_load=args.lazy_load, max_examples=args.max_val_examples
+        )
+        collate_fn = collate_token_level
+    else:  # line-level
+        train_dataset = LineLevelDataset(
+            os.path.join(args.dataset_dir, "line_level", "train.jsonl"),
+            vocab, args.max_length, max_suffix_length=args.max_suffix_length,
+            lazy_load=args.lazy_load, max_examples=args.max_train_examples
+        )
+        val_dataset = LineLevelDataset(
+            os.path.join(args.dataset_dir, "line_level", "dev.jsonl"),
+            vocab, args.max_length, max_suffix_length=args.max_suffix_length,
+            lazy_load=args.lazy_load, max_examples=args.max_val_examples
+        )
+        collate_fn = collate_line_level
     
     print(f"Training examples: {len(train_dataset):,}")
     print(f"Validation examples: {len(val_dataset):,}\n")
@@ -394,7 +650,7 @@ def main():
         train_dataset, 
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=collate_token_level,
+        collate_fn=collate_fn,
         num_workers=args.num_workers,
         pin_memory=True if args.device == 'cuda' else False
     )
@@ -402,7 +658,7 @@ def main():
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collate_token_level,
+        collate_fn=collate_fn,
         num_workers=args.num_workers,
         pin_memory=True if args.device == 'cuda' else False
     )
@@ -418,7 +674,8 @@ def main():
     
     # Training loop
     best_val_loss = float('inf')
-    model_path = os.path.join(output_dir, 'best_model.pt')
+    model_filename = f'best_model_{args.task}_level.pt'
+    model_path = os.path.join(output_dir, model_filename)
     
     print("="*60)
     print("STARTING TRAINING")
@@ -429,14 +686,17 @@ def main():
         print("-" * 60)
         
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, args.device, args.accumulation_steps)
-        
-        # Validate
-        val_loss, val_accuracy = validate(model, val_loader, criterion, args.device)
+        if args.task == 'token':
+            train_loss = train_epoch_token(model, train_loader, optimizer, criterion, args.device, args.accumulation_steps)
+            val_loss, val_accuracy = validate_token(model, val_loader, criterion, args.device)
+        else:  # line-level
+            train_loss = train_epoch_line(model, train_loader, optimizer, criterion, config, args.device, args.accumulation_steps)
+            val_loss, val_accuracy = validate_line(model, val_loader, criterion, config, args.device)
         
         print(f"\nTrain Loss: {train_loss:.4f}")
         print(f"Val Loss: {val_loss:.4f}")
-        print(f"Val Accuracy: {val_accuracy*100:.2f}%")
+        if val_accuracy is not None:
+            print(f"Val Accuracy: {val_accuracy*100:.2f}%")
         
         # Save best model
         if val_loss < best_val_loss:

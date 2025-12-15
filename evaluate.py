@@ -123,8 +123,29 @@ def main():
     
     print(f"Using device: {args.device}")
     
+    # Auto-detect vocab from run directory if model is in runs/ directory
+    model_dir = os.path.dirname(os.path.abspath(args.model_path))
+    if 'runs' in model_dir and args.vocab_path == "vocab.json":
+        # Model is in a run directory, try to use vocab from same directory
+        run_vocab_path = os.path.join(model_dir, 'vocab.json')
+        if os.path.exists(run_vocab_path):
+            args.vocab_path = run_vocab_path
+            print(f"Auto-detected vocab from run directory: {args.vocab_path}")
+        else:
+            print(f"Warning: vocab.json not found in {model_dir}, using default")
+    
+    # Try to load training parameters for max_length if in run directory
+    training_params_path = os.path.join(model_dir, 'training_params.json')
+    if os.path.exists(training_params_path):
+        print(f"Loading training parameters from {training_params_path}...")
+        with open(training_params_path, 'r') as f:
+            training_params = json.load(f)
+        if 'max_length' in training_params and args.max_length == 256:  # Only override if default
+            args.max_length = training_params['max_length']
+            print(f"Using max_length={args.max_length} from training parameters")
+    
     # Load vocabulary
-    print("Loading vocabulary...")
+    print(f"Loading vocabulary from {args.vocab_path}...")
     vocab = Vocabulary()
     with open(args.vocab_path, 'r') as f:
         vocab_data = json.load(f)
