@@ -16,8 +16,12 @@ cs559_code_completion/
 ├── model.py                      # Transformer model architecture
 ├── preprocess.py                 # Data preprocessing script (tokenization)
 ├── create_completion_datasets.py # Create token/line-level completion datasets
-├── train.py                      # Training script
+├── train.py                      # Original training script (token + line level)
+├── train_v2.py                   # Recommended training script (cleaner, with gradient accumulation)
+├── evaluate.py                   # Evaluation script
 ├── inference.py                  # Inference script
+├── PARAMETER_GUIDE.md            # Guide for choosing training parameters
+├── EXPERIMENT_GUIDE.md           # Guide for systematic hyperparameter experiments
 ├── requirements.txt              # Python dependencies
 ├── download_and_extract.sh       # Script to download py150 dataset
 ├── literals.json                 # Common string/number literals for tokenization
@@ -107,6 +111,15 @@ The `create_completion_datasets.py` script creates task-specific datasets:
 
 ## Training
 
+### Recommended: Using train_v2.py
+
+`train_v2.py` is the recommended training script with improved features:
+- Gradient accumulation support (reduces GPU memory usage)
+- Configurable learning rate and weight decay
+- Validation accuracy reporting
+- Better code organization
+- Reproducibility (random seed support)
+
 ### Quick Start
 
 1. **Create completion datasets** (if not already done):
@@ -116,51 +129,90 @@ The `create_completion_datasets.py` script creates task-specific datasets:
        --output_dir completion_datasets
    ```
 
-2. **Train token-level model**:
+2. **Train token-level model** (recommended):
    ```bash
-   python train.py \
+   python train_v2.py \
        --task token \
-       --dataset_dir completion_datasets \
-       --tokenized_dir token_completion \
+       --vocab_min_freq 25 \
        --batch_size 32 \
-       --num_epochs 10 \
+       --num_epochs 15 \
        --max_length 256 \
+       --max_train_examples 200000 \
        --device cuda
    ```
 
 3. **Train line-level model**:
    ```bash
-   python train.py \
+   python train_v2.py \
        --task line \
-       --dataset_dir completion_datasets \
-       --tokenized_dir token_completion \
+       --vocab_min_freq 25 \
        --batch_size 32 \
-       --num_epochs 10 \
+       --num_epochs 15 \
        --max_length 256 \
+       --max_train_examples 200000 \
        --device cuda
    ```
 
-### Training Options
+4. **With gradient accumulation** (if GPU memory is limited):
+   ```bash
+   python train_v2.py \
+       --task token \
+       --batch_size 16 \
+       --accumulation_steps 4 \
+       --num_epochs 15 \
+       --max_length 256 \
+       --device cuda
+   ```
+   This simulates batch_size=64 (16×4) with less GPU memory.
 
+### Training Options (train_v2.py)
+
+**Data arguments:**
 - `--task`: `token` or `line` (default: `token`)
 - `--dataset_dir`: Directory with completion datasets (default: `completion_datasets`)
 - `--tokenized_dir`: Directory with tokenized files for vocabulary (default: `token_completion`)
+
+**Training hyperparameters:**
 - `--batch_size`: Batch size (default: 32)
 - `--num_epochs`: Number of training epochs (default: 10)
 - `--max_length`: Maximum sequence length (default: 256)
-- `--vocab_min_freq`: Minimum token frequency for vocabulary (default: 10)
-- `--vocab_sample_lines`: Sample N lines for vocabulary building (None = all, use to save memory)
-- `--lazy_load`: Use lazy loading for datasets (default: True, saves memory)
+- `--learning_rate`: Learning rate (default: 1e-4)
+- `--weight_decay`: Weight decay / L2 regularization (default: 0.01)
+- `--accumulation_steps`: Gradient accumulation steps (default: 1, use >1 to reduce GPU memory)
+
+**Vocabulary arguments:**
+- `--vocab_min_freq`: Minimum token frequency for vocabulary (default: 10, higher = smaller vocab)
+- `--vocab_sample_lines`: Sample N lines for vocabulary building (default: 50000)
+
+**Data loading:**
+- `--max_train_examples`: Limit number of training examples (None = all)
+- `--max_val_examples`: Limit number of validation examples (default: 10000)
+- `--lazy_load`: Use lazy loading for datasets (saves memory)
+- `--num_workers`: Number of data loading workers (default: 4)
+
+**System:**
 - `--device`: `cuda` or `cpu` (auto-detected)
+- `--seed`: Random seed for reproducibility (default: 42)
+
+### Alternative: Using train.py
+
+The original `train.py` script is also available and supports both token and line-level training. See `train.py --help` for options.
+
+### Parameter Selection Guide
+
+For guidance on choosing parameters (vocab size, batch size, etc.), see **`PARAMETER_GUIDE.md`**.
+
+For systematic hyperparameter experiments (learning rate, dropout, etc.), see **`EXPERIMENT_GUIDE.md`**.
 
 ### Output Files
 
 Training creates a run directory in `runs/` named after the training parameters:
-- Directory name format: `run_{task}_bs{batch_size}_ep{epochs}_len{max_length}_vocab{min_freq}_{timestamp}`
-- Example: `runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/`
+- **train.py format**: `run_{task}_bs{batch_size}_ep{epochs}_len{max_length}_vocab{min_freq}_{timestamp}`
+- **train_v2.py format**: `run_{task}_v2_bs{batch_size}_ep{epochs}_len{max_length}_vocab{min_freq}_{timestamp}`
+- Example: `runs/run_token_v2_bs32_ep15_len256_vocab25_20240101_120000/`
 
 Each run directory contains:
-- `best_model_token_level.pt` or `best_model_line_level.pt` - Best model checkpoint
+- `best_model.pt` (train_v2.py) or `best_model_token_level.pt`/`best_model_line_level.pt` (train.py) - Best model checkpoint
 - `vocab.json` - Vocabulary mapping (tokens ↔ indices)
 - `training_params.json` - All training parameters used for this run
 - `test_results.json` - Evaluation results (created after running `evaluate.py`)
@@ -195,33 +247,49 @@ python inference.py \
 
 ## Evaluation
 
-Evaluate a trained model on the test set:
+Evaluate a trained model on the test set. The script automatically detects vocabulary and training parameters from the run directory:
 
 ```bash
+# Simple evaluation (auto-detects vocab and max_length from run directory)
 python evaluate.py \
-    --model_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/best_model_token_level.pt \
-    --vocab_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/vocab.json \
+    --model_path runs/run_token_v2_bs32_ep15_len256_vocab25_20240101_120000/best_model.pt \
     --task token \
-    --dataset_dir completion_datasets \
-    --batch_size 32 \
     --device cuda
 ```
 
-The evaluation script will:
-- Automatically detect if the model is in a `runs/` directory
-- Save `test_results.json` to the same run directory
-- Include evaluation metrics (loss, accuracy) and evaluation parameters in the results file
+### Evaluation with Options
+
+```bash
+# Limit test examples for faster evaluation
+python evaluate.py \
+    --model_path runs/run_token_v2_bs32_ep15_len256_vocab25_20240101_120000/best_model.pt \
+    --task token \
+    --max_test_examples 50000 \
+    --num_workers 0 \
+    --device cuda
+```
 
 ### Evaluation Options
 
 - `--model_path`: Path to trained model checkpoint (required)
-- `--vocab_path`: Path to vocabulary file (default: `vocab.json`)
+- `--vocab_path`: Path to vocabulary file (auto-detected from model directory if not specified)
 - `--task`: `token` or `line` (default: `token`)
 - `--dataset_dir`: Directory containing test datasets (default: `completion_datasets`)
-- `--max_length`: Maximum sequence length (default: 256)
+- `--max_length`: Maximum sequence length (auto-detected from training_params.json if available)
 - `--batch_size`: Batch size for evaluation (default: 32)
-- `--max_test_examples`: Limit number of test examples (None = all)
-- `--device`: `cuda` or `cpu` (auto-detected)
+- `--max_test_examples`: Limit number of test examples (None = all, recommended for large test sets)
+- `--num_workers`: Number of data loading workers (default: 4, use 0 if experiencing hangs)
+- `--lazy_load`: Use lazy loading (default: True, saves memory)
+- `--device`: `cuda` or `cpu` (auto-detected, falls back to CPU if CUDA unavailable)
+
+### Auto-Detection Features
+
+The evaluation script automatically:
+- **Detects vocabulary** from the same directory as the model (if `vocab.json` exists there)
+- **Loads training parameters** from `training_params.json` to set `max_length`
+- **Saves results** to the same run directory as the model
+
+This means you typically only need to specify `--model_path` and `--task`!
 
 
 ### Data Flow
@@ -233,19 +301,22 @@ The evaluation script will:
    - JSONL format with context/target pairs
    - Created by `create_completion_datasets.py`
 
-3. **Training** (`train.py`)
+3. **Training** (`train.py` or `train_v2.py`)
    - Builds vocabulary from tokenized files
    - Converts tokens to indices
    - Trains model with PyTorch DataLoader
    - Creates run directory with model, vocabulary, and training parameters
+   - Supports gradient accumulation (train_v2.py) for memory efficiency
 
 4. **Evaluation** (`evaluate.py`)
-   - Loads trained model and vocabulary
+   - Auto-detects vocabulary and training parameters from run directory
+   - Loads trained model
    - Evaluates on test set
    - Saves results to run directory
 
 5. **Inference** (`inference.py`)
-   - Loads trained model and vocabulary
+   - Auto-detects vocabulary and training parameters from run directory
+   - Loads trained model
    - Converts input tokens to indices
    - Generates predictions
 
@@ -317,10 +388,39 @@ If training starts but gets killed due to memory issues:
 
 ### Other Issues
 
-- **Out of memory**: Reduce `--batch_size` or `--max_length`
-- **Slow training**: Use GPU (`--device cuda`) or reduce batch size
-- **Poor predictions**: Train longer, check data quality, adjust learning rate
-- **Process killed during vocabulary building**: Use `--vocab_sample_lines` to limit vocabulary building
+- **Out of memory**: 
+  - Reduce `--batch_size` or `--max_length`
+  - Use gradient accumulation: `--accumulation_steps 4` (train_v2.py)
+  - Use `--vocab_min_freq 50` or higher to reduce vocabulary size
+  
+- **Slow training**: 
+  - Use GPU (`--device cuda`)
+  - Reduce batch size or use gradient accumulation
+  - Use `--lazy_load` to save memory
+  
+- **Poor predictions**: 
+  - Train longer (more epochs)
+  - Check data quality
+  - Adjust learning rate (see `EXPERIMENT_GUIDE.md`)
+  - Try different vocabulary sizes (see `PARAMETER_GUIDE.md`)
+  
+- **Process killed during vocabulary building**: 
+  - Use `--vocab_sample_lines` to limit vocabulary building
+  
+- **Evaluation hangs or is slow**:
+  - Use `--num_workers 0` to disable multiprocessing
+  - Use `--max_test_examples` to limit test set size
+  - Use `--lazy_load` (default: True) to avoid loading all examples into memory
+  
+- **Vocabulary mismatch errors**:
+  - Always use the `vocab.json` from the same run directory as the model
+  - The evaluation script auto-detects this, but you can specify `--vocab_path` explicitly
+
+## Additional Resources
+
+- **`PARAMETER_GUIDE.md`**: Comprehensive guide for choosing training parameters (vocab size, batch size, etc.)
+- **`EXPERIMENT_GUIDE.md`**: Guide for systematic hyperparameter experiments (learning rate, dropout, regularization, etc.)
+- **`diagnose_accuracy_issue.py`**: Diagnostic tool to identify vocabulary mismatches and configuration issues
 
 ## To Do
 

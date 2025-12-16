@@ -161,8 +161,16 @@ def main():
     
     # Load model
     print(f"Loading model from {args.model_path}...")
+    
+    # Handle device mapping: always load to CPU first, then move to target device
+    if args.device == 'cuda' and not torch.cuda.is_available():
+        print("Warning: CUDA requested but not available. Using CPU instead.")
+        args.device = 'cpu'
+    
+    # Load model (map to CPU first to avoid device mismatch errors)
+    map_location = 'cpu' if args.device == 'cpu' else args.device
     model = CodeCompletionTransformer(config)
-    model.load_state_dict(torch.load(args.model_path, map_location=args.device))
+    model.load_state_dict(torch.load(args.model_path, map_location=map_location))
     model = model.to(args.device)
     model.eval()
     
