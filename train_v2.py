@@ -566,12 +566,13 @@ def main():
     print()
     
     # Create run directory
+    # Note: Using a run_name without the timestamp at this stage allows resuming from a previous run
+    # that used the same training parameters, provided the directory already exists.
     run_name = f"run_{args.task}_v2_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
     if args.max_train_examples:
         run_name += f"_train{args.max_train_examples}"
     if args.accumulation_steps > 1:
         run_name += f"_acc{args.accumulation_steps}"
-    run_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     output_dir = os.path.join('runs', run_name)
     os.makedirs(output_dir, exist_ok=True)
@@ -618,6 +619,55 @@ def main():
     print(f"Model parameters: {param_count:,}")
     print(f"Model size: {param_count * 4 / 1024 / 1024:.2f} MB (float32)\n")
     
+    # Setup training components
+    model = model.to(args.device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
+    
+    # --- Checkpoint Loading Mechanism ---
+    start_epoch = 0
+    best_val_loss = float('inf')
+    
+    # Find latest checkpoint
+    checkpoint_files = [f for f in os.listdir(output_dir) if f.startswith('checkpoint_epoch_') and f.endswith('.pt')]
+    
+    if checkpoint_files:
+        try:
+            # Extract epoch number from filenames (e.g., 'checkpoint_epoch_5.pt' -> 5)
+            latest_epoch = max([int(f.split('_')[-1].replace('.pt', '')) for f in checkpoint_files])
+            latest_checkpoint_file = os.path.join(output_dir, f'checkpoint_epoch_{latest_epoch}.pt')
+            
+            print(f"Found checkpoint: {latest_checkpoint_file}. Attempting to resume training...")
+            checkpoint = torch.load(latest_checkpoint_file, map_location=args.device)
+            
+            # Load model state (weights)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Load optimizer state
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Move optimizer state tensors to the current device
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(args.device)
+            
+            # Update training metadata
+            start_epoch = checkpoint['epoch']
+            best_val_loss = checkpoint['best_val_loss']
+            
+            print(f"Successfully loaded model and optimizer states. Resuming from Epoch {start_epoch + 1}/{args.num_epochs}.")
+            print(f"Current best validation loss: {best_val_loss:.4f}")
+            
+        except Exception as e:
+            print(f"Error loading checkpoint {latest_checkpoint_file}: {e}. Starting training from epoch 1.")
+            start_epoch = 0
+            best_val_loss = float('inf')
+
     # Create datasets
     if args.task == 'token':
         train_dataset = TokenLevelDataset(
@@ -663,17 +713,7 @@ def main():
         pin_memory=True if args.device == 'cuda' else False
     )
     
-    # Setup training
-    model = model.to(args.device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay
-    )
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
-    
-    # Training loop
-    best_val_loss = float('inf')
+    # Training loop setup (model and optimizer are already setup/loaded)
     model_filename = f'best_model_{args.task}_level.pt'
     model_path = os.path.join(output_dir, model_filename)
     
@@ -681,8 +721,10 @@ def main():
     print("STARTING TRAINING")
     print("="*60)
     
-    for epoch in range(args.num_epochs):
-        print(f"\nEpoch {epoch+1}/{args.num_epochs}")
+    # Loop starts from the epoch after the last saved checkpoint (start_epoch)
+    for epoch in range(start_epoch, args.num_epochs): 
+        current_epoch = epoch + 1
+        print(f"\nEpoch {current_epoch}/{args.num_epochs}")
         print("-" * 60)
         
         # Train
@@ -698,11 +740,24 @@ def main():
         if val_accuracy is not None:
             print(f"Val Accuracy: {val_accuracy*100:.2f}%")
         
-        # Save best model
+        # Save best model (model weights only)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), model_path)
-            print(f"✓ Saved best model (val_loss: {val_loss:.4f})")
+            print(f"✓ Saved best model state (val_loss: {val_loss:.4f})")
+            
+        # --- Save Full Checkpoint after every epoch ---
+        checkpoint_path = os.path.join(output_dir, f'checkpoint_epoch_{current_epoch}.pt')
+        checkpoint_to_save = {
+            'epoch': current_epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_val_loss': best_val_loss,
+            'args': vars(args), # Save arguments for context
+            'timestamp': datetime.now().strftime('%Y%m%d_%H%M%S')
+        }
+        torch.save(checkpoint_to_save, checkpoint_path)
+        print(f"✓ Saved epoch checkpoint to {checkpoint_path}")
     
     print("\n" + "="*60)
     print("TRAINING COMPLETE")
