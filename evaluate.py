@@ -124,9 +124,45 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of data loading workers")
     
+    # Model architecture overrides (if training_params.json is missing these or you want to override)
+    parser.add_argument("--d_model", type=int, default=None,
+                        help="Override d_model (auto-detected from training_params.json if available)")
+    parser.add_argument("--n_layer", type=int, default=None,
+                        help="Override n_layer (auto-detected from training_params.json if available)")
+    parser.add_argument("--n_head", type=int, default=None,
+                        help="Override n_head (auto-detected from training_params.json if available)")
+    parser.add_argument("--d_ff", type=int, default=None,
+                        help="Override d_ff (auto-detected from training_params.json if available)")
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="Override dropout (auto-detected from training_params.json if available)")
+    
     args = parser.parse_args()
     
     print(f"Using device: {args.device}")
+    
+    # If user passed a directory, auto-detect the model file
+    if os.path.isdir(args.model_path):
+        model_dir = os.path.abspath(args.model_path)
+        # Look for best_model_{task}_level.pt or best_model.pt
+        task_suffix = f"{args.task}_level"
+        candidate_paths = [
+            os.path.join(model_dir, f"best_model_{task_suffix}.pt"),
+            os.path.join(model_dir, "best_model.pt"),
+            os.path.join(model_dir, "best_model_token_level.pt"),
+            os.path.join(model_dir, "best_model_line_level.pt"),
+        ]
+        found = None
+        for candidate in candidate_paths:
+            if os.path.exists(candidate):
+                found = candidate
+                break
+        if found:
+            print(f"Auto-detected model file: {found}")
+            args.model_path = found
+        else:
+            raise FileNotFoundError(
+                f"Model directory provided but no model file found. Tried: {candidate_paths}"
+            )
     
     # Auto-detect vocab and training params from model directory
     model_dir = os.path.dirname(os.path.abspath(args.model_path))
@@ -164,14 +200,58 @@ def main():
     config = ModelConfig()
     config.vocab_size = vocab_size
     config.max_len = args.max_length
-    # If train_v2.py saved architecture flags, load them for shape-compatible model init
+    
+    # Load architecture params (priority: CLI args > training_params.json > classic defaults)
+    arch_params = {}
     if isinstance(training_params, dict):
         for k in ['d_model', 'n_layer', 'n_head', 'd_ff', 'dropout']:
             if k in training_params:
-                setattr(config, k, training_params[k])
+                arch_params[k] = training_params[k]
+    
+    # Apply architecture params (CLI overrides take precedence)
+    if args.d_model is not None:
+        config.d_model = args.d_model
+    elif 'd_model' in arch_params:
+        config.d_model = arch_params['d_model']
+    else:
+        config.d_model = 512  # Classic default for old runs
+    
+    if args.n_layer is not None:
+        config.n_layer = args.n_layer
+    elif 'n_layer' in arch_params:
+        config.n_layer = arch_params['n_layer']
+    else:
+        config.n_layer = 6  # Classic default
+    
+    if args.n_head is not None:
+        config.n_head = args.n_head
+    elif 'n_head' in arch_params:
+        config.n_head = arch_params['n_head']
+    else:
+        config.n_head = 8  # Classic default
+    
+    if args.d_ff is not None:
+        config.d_ff = args.d_ff
+    elif 'd_ff' in arch_params:
+        config.d_ff = arch_params['d_ff']
+    else:
+        config.d_ff = 2048  # Classic default
+    
+    if args.dropout is not None:
+        config.dropout = args.dropout
+    elif 'dropout' in arch_params:
+        config.dropout = arch_params['dropout']
+    else:
+        config.dropout = 0.1  # Classic default
+    
+    if not isinstance(training_params, dict) or not any(k in training_params for k in ['d_model', 'n_layer']):
+        print("Note: Using classic architecture defaults (d_model=512, n_layer=6, n_head=8, d_ff=2048, dropout=0.1)")
+        print("      If this causes shape mismatches, use --d_model --n_layer --n_head --d_ff --dropout to override")
     
     # Load model
     print(f"Loading model from {args.model_path}...")
+    print(f"Model config: d_model={config.d_model}, n_layer={config.n_layer}, n_head={config.n_head}, "
+          f"d_ff={config.d_ff}, dropout={config.dropout}, vocab_size={config.vocab_size}, max_len={config.max_len}")
     
     # Handle device mapping: always load to CPU first, then move to target device
     if args.device == 'cuda' and not torch.cuda.is_available():
@@ -189,7 +269,22 @@ def main():
         state_dict = loaded_obj['model_state_dict']
     else:
         state_dict = loaded_obj
-    model.load_state_dict(state_dict)
+    
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError as e:
+        if "size mismatch" in str(e) or "shape" in str(e).lower():
+            print("\n" + "="*60)
+            print("ERROR: Model architecture mismatch!")
+            print("="*60)
+            print("The saved model has a different architecture than the config being used.")
+            print(f"\nAttempted config: d_model={config.d_model}, n_layer={config.n_layer}, "
+                  f"n_head={config.n_head}, d_ff={config.d_ff}")
+            print("\nTo fix this, you can:")
+            print("1. Manually inspect the model checkpoint to determine its architecture")
+            print("2. Or re-train with the architecture flags so training_params.json includes them")
+            print("="*60)
+        raise
     model = model.to(args.device)
     model.eval()
     
