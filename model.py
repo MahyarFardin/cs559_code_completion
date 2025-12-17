@@ -6,7 +6,7 @@ class ModelConfig:
     vocab_size = 32000
     d_model = 348
     n_layer = 4
-    n_head = 8
+    n_head = 6
     d_ff = 1392
     max_len = 256
     dropout = 0.2
