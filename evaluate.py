@@ -121,8 +121,8 @@ def main():
     parser.add_argument("--no_lazy_load", dest="lazy_load", action="store_false",
                         help="Disable lazy loading (loads all examples into memory)")
     parser.add_argument("--device", type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="Number of data loading workers")
+    parser.add_argument("--num_workers", type=int, default=0,
+                        help="Number of data loading workers (0 recommended for evaluation to avoid hangs)")
     
     # Model architecture overrides (if training_params.json is missing these or you want to override)
     parser.add_argument("--d_model", type=int, default=None,

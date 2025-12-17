@@ -9,7 +9,7 @@ class ModelConfig:
     n_head = 6
     d_ff = 1392
     max_len = 256
-    dropout = 0.2
+    dropout = 0.3
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -37,7 +37,8 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / k.size(-1)**2)
+        #att = (q @ k.transpose(-2, -1)) * (1.0 / k.size(-1)**2)
+        att = (q @ k.transpose(-2, -1)) * (1.0 / (k.size(-1)**0.5))
 
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
 

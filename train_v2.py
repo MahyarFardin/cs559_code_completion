@@ -13,6 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from collections import Counter
 from tqdm import tqdm
 from datetime import datetime
+from torch.optim.lr_scheduler import OneCycleLR
 
 from model import CodeCompletionTransformer, ModelConfig
 
@@ -296,7 +297,7 @@ def collate_line_level(batch):
     }
 
 
-def train_epoch_token(model, train_loader, optimizer, criterion, device, accumulation_steps=1):
+def train_epoch_token(model, train_loader, optimizer, criterion, device, accumulation_steps=1, scheduler=None):
     """Train for one epoch (token-level)."""
     model.train()
     total_loss = 0.0
@@ -336,6 +337,8 @@ def train_epoch_token(model, train_loader, optimizer, criterion, device, accumul
         if (batch_idx + 1) % accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad()
         
         pbar.set_postfix({'loss': loss.item() * accumulation_steps})
@@ -344,13 +347,15 @@ def train_epoch_token(model, train_loader, optimizer, criterion, device, accumul
     if len(train_loader) % accumulation_steps != 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         optimizer.zero_grad()
     
     avg_loss = total_loss / num_batches
     return avg_loss
 
 
-def train_epoch_line(model, train_loader, optimizer, criterion, config, device, accumulation_steps=1):
+def train_epoch_line(model, train_loader, optimizer, criterion, config, device, accumulation_steps=1, scheduler=None):
     """Train for one epoch (line-level)."""
     model.train()
     total_loss = 0.0
@@ -416,6 +421,8 @@ def train_epoch_line(model, train_loader, optimizer, criterion, config, device, 
         if (batch_idx + 1) % accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad()
         
         pbar.set_postfix({'loss': batch_loss_value})
@@ -424,6 +431,8 @@ def train_epoch_line(model, train_loader, optimizer, criterion, config, device, 
     if len(train_loader) % accumulation_steps != 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         optimizer.zero_grad()
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
@@ -550,6 +559,8 @@ def main():
                         help="Weight decay (L2 regularization)")
     parser.add_argument("--accumulation_steps", type=int, default=1,
                         help="Gradient accumulation steps (1 = normal, >1 = accumulate)")
+    parser.add_argument("--early_stopping_patience", type=int, default=3,
+                        help="Early stopping patience (None = disabled, N = stop after N epochs without improvement)")
 
     # Model architecture arguments (override ModelConfig defaults)
     parser.add_argument("--d_model", type=int, default=ModelConfig.d_model,
@@ -687,6 +698,7 @@ def main():
     # --- Checkpoint Loading Mechanism ---
     start_epoch = 0
     best_val_loss = float('inf')
+    epochs_without_improvement = 0
     
     # Find latest checkpoint
     checkpoint_files = [f for f in os.listdir(output_dir) if f.startswith('checkpoint_epoch_') and f.endswith('.pt')]
@@ -735,6 +747,8 @@ def main():
             # Update training metadata
             start_epoch = checkpoint['epoch']
             best_val_loss = checkpoint['best_val_loss']
+            # Reset early stopping counter when resuming (allows patience more epochs from this point)
+            epochs_without_improvement = 0
             
             print(f"Successfully loaded model and optimizer states. Resuming from Epoch {start_epoch + 1}/{args.num_epochs}.")
             print(f"Current best validation loss: {best_val_loss:.4f}")
@@ -743,6 +757,7 @@ def main():
             print(f"Error loading checkpoint {latest_checkpoint_file}: {e}. Starting training from epoch 1.")
             start_epoch = 0
             best_val_loss = float('inf')
+            epochs_without_improvement = 0
 
     # Create datasets
     if args.task == 'token':
@@ -789,6 +804,15 @@ def main():
         pin_memory=True if args.device == 'cuda' else False
     )
     
+    # Create learning rate scheduler (OneCycleLR)
+    total_steps = (args.num_epochs - start_epoch) * len(train_loader)
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=args.learning_rate,
+        total_steps=total_steps,
+        pct_start=0.1  # 10% warmup
+    )
+    
     # Training loop setup (model and optimizer are already setup/loaded)
     model_filename = f'best_model_{args.task}_level.pt'
     model_path = os.path.join(output_dir, model_filename)
@@ -805,10 +829,10 @@ def main():
         
         # Train
         if args.task == 'token':
-            train_loss = train_epoch_token(model, train_loader, optimizer, criterion, args.device, args.accumulation_steps)
+            train_loss = train_epoch_token(model, train_loader, optimizer, criterion, args.device, args.accumulation_steps, scheduler)
             val_loss, val_accuracy = validate_token(model, val_loader, criterion, args.device)
         else:  # line-level
-            train_loss = train_epoch_line(model, train_loader, optimizer, criterion, config, args.device, args.accumulation_steps)
+            train_loss = train_epoch_line(model, train_loader, optimizer, criterion, config, args.device, args.accumulation_steps, scheduler)
             val_loss, val_accuracy = validate_line(model, val_loader, criterion, config, args.device)
         
         print(f"\nTrain Loss: {train_loss:.4f}")
@@ -816,11 +840,18 @@ def main():
         if val_accuracy is not None:
             print(f"Val Accuracy: {val_accuracy*100:.2f}%")
         
-        # Save best model (model weights only)
+        # Save best model (model weights only) and track early stopping
+        improved = False
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            epochs_without_improvement = 0
+            improved = True
             torch.save(model.state_dict(), model_path)
             print(f"✓ Saved best model state (val_loss: {val_loss:.4f})")
+        else:
+            epochs_without_improvement += 1
+            if args.early_stopping_patience is not None:
+                print(f"  No improvement for {epochs_without_improvement}/{args.early_stopping_patience} epochs")
             
         # --- Save Full Checkpoint after every epoch ---
         checkpoint_path = os.path.join(output_dir, f'checkpoint_epoch_{current_epoch}.pt')
@@ -834,6 +865,14 @@ def main():
         }
         torch.save(checkpoint_to_save, checkpoint_path)
         print(f"✓ Saved epoch checkpoint to {checkpoint_path}")
+        
+        # Early stopping check
+        if args.early_stopping_patience is not None and epochs_without_improvement >= args.early_stopping_patience:
+            print("\n" + "="*60)
+            print(f"EARLY STOPPING: No improvement for {epochs_without_improvement} epochs (patience={args.early_stopping_patience})")
+            print(f"Best validation loss was: {best_val_loss:.4f}")
+            print("="*60)
+            break
     
     print("\n" + "="*60)
     print("TRAINING COMPLETE")
