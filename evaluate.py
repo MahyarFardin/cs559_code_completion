@@ -139,7 +139,8 @@ def main():
     elif args.vocab_path == "vocab.json":
         print(f"Using default vocab.json (not found in {model_dir})")
     
-    # Try to load training parameters for max_length if in run directory
+    training_params = None
+    # Try to load training parameters for max_length / architecture if in run directory
     training_params_path = os.path.join(model_dir, 'training_params.json')
     if os.path.exists(training_params_path):
         print(f"Loading training parameters from {training_params_path}...")
@@ -163,6 +164,11 @@ def main():
     config = ModelConfig()
     config.vocab_size = vocab_size
     config.max_len = args.max_length
+    # If train_v2.py saved architecture flags, load them for shape-compatible model init
+    if isinstance(training_params, dict):
+        for k in ['d_model', 'n_layer', 'n_head', 'd_ff', 'dropout']:
+            if k in training_params:
+                setattr(config, k, training_params[k])
     
     # Load model
     print(f"Loading model from {args.model_path}...")

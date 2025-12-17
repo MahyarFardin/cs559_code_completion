@@ -550,6 +550,18 @@ def main():
                         help="Weight decay (L2 regularization)")
     parser.add_argument("--accumulation_steps", type=int, default=1,
                         help="Gradient accumulation steps (1 = normal, >1 = accumulate)")
+
+    # Model architecture arguments (override ModelConfig defaults)
+    parser.add_argument("--d_model", type=int, default=ModelConfig.d_model,
+                        help="Transformer width / embedding dimension")
+    parser.add_argument("--n_layer", type=int, default=ModelConfig.n_layer,
+                        help="Number of transformer blocks (depth)")
+    parser.add_argument("--n_head", type=int, default=ModelConfig.n_head,
+                        help="Number of attention heads (must divide d_model)")
+    parser.add_argument("--d_ff", type=int, default=ModelConfig.d_ff,
+                        help="Feed-forward (MLP) hidden dimension")
+    parser.add_argument("--dropout", type=float, default=ModelConfig.dropout,
+                        help="Dropout probability")
     
     # Vocabulary arguments
     parser.add_argument("--vocab_min_freq", type=int, default=10,
@@ -591,12 +603,20 @@ def main():
         print(f"Effective batch size: {args.batch_size * args.accumulation_steps}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Weight decay: {args.weight_decay}")
+    print(f"Model: d_model={args.d_model}, n_layer={args.n_layer}, n_head={args.n_head}, d_ff={args.d_ff}, dropout={args.dropout}")
     print()
     
     # Create run directory
     # Note: Using a run_name without the timestamp at this stage allows resuming from a previous run
     # that used the same training parameters, provided the directory already exists.
-    run_name = f"run_{args.task}_v2_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    # Keep run names deterministic so identical configs can resume safely.
+    do_tag = int(round(args.dropout * 100))
+    run_name = (
+        f"run_{args.task}_v2"
+        f"_dm{args.d_model}_ly{args.n_layer}_hd{args.n_head}_ff{args.d_ff}_do{do_tag}"
+        f"_lr{args.learning_rate:g}_wd{args.weight_decay:g}"
+        f"_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    )
     if args.max_train_examples:
         run_name += f"_train{args.max_train_examples}"
     if args.accumulation_steps > 1:
@@ -626,6 +646,14 @@ def main():
     config = ModelConfig()
     config.vocab_size = vocab_size
     config.max_len = args.max_length
+    config.d_model = args.d_model
+    config.n_layer = args.n_layer
+    config.n_head = args.n_head
+    config.d_ff = args.d_ff
+    config.dropout = args.dropout
+
+    if config.d_model % config.n_head != 0:
+        raise ValueError(f"d_model ({config.d_model}) must be divisible by n_head ({config.n_head})")
     
     # Warn if vocab is very large
     if vocab_size > 50000:
@@ -671,6 +699,26 @@ def main():
             
             print(f"Found checkpoint: {latest_checkpoint_file}. Attempting to resume training...")
             checkpoint = torch.load(latest_checkpoint_file, map_location=args.device)
+
+            # Refuse to resume if key hyperparameters changed (prevents subtle mismatches)
+            ck_args = checkpoint.get('args', {})
+            keys_to_match = [
+                'task', 'max_length', 'vocab_min_freq',
+                'd_model', 'n_layer', 'n_head', 'd_ff', 'dropout',
+                'learning_rate', 'weight_decay'
+            ]
+            mismatches = []
+            for k in keys_to_match:
+                if k in ck_args and ck_args.get(k) != getattr(args, k, None):
+                    mismatches.append((k, ck_args.get(k), getattr(args, k, None)))
+            if mismatches:
+                print("Found checkpoint, but config differs from current args; NOT resuming.")
+                for k, old_v, new_v in mismatches[:10]:
+                    print(f"  - {k}: checkpoint={old_v} vs current={new_v}")
+                start_epoch = 0
+                best_val_loss = float('inf')
+                checkpoint = None
+                raise RuntimeError("Checkpoint args mismatch")
             
             # Load model state (weights)
             model.load_state_dict(checkpoint['model_state_dict'])

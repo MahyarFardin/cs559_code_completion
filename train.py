@@ -543,6 +543,18 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--max_length", type=int, default=256)
     parser.add_argument("--device", type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Model architecture arguments (override ModelConfig defaults)
+    parser.add_argument("--d_model", type=int, default=ModelConfig.d_model,
+                        help="Transformer width / embedding dimension")
+    parser.add_argument("--n_layer", type=int, default=ModelConfig.n_layer,
+                        help="Number of transformer blocks (depth)")
+    parser.add_argument("--n_head", type=int, default=ModelConfig.n_head,
+                        help="Number of attention heads (must divide d_model)")
+    parser.add_argument("--d_ff", type=int, default=ModelConfig.d_ff,
+                        help="Feed-forward (MLP) hidden dimension")
+    parser.add_argument("--dropout", type=float, default=ModelConfig.dropout,
+                        help="Dropout probability")
     parser.add_argument("--vocab_min_freq", type=int, default=10,
                         help="Minimum frequency for vocabulary tokens (higher = smaller vocab)")
     parser.add_argument("--vocab_sample_lines", type=int, default=50000,
@@ -561,7 +573,12 @@ def main():
     print(f"Using device: {args.device}")
     
     # Create run directory based on parameters
-    run_name = f"run_{args.task}_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    do_tag = int(round(args.dropout * 100))
+    run_name = (
+        f"run_{args.task}"
+        f"_dm{args.d_model}_ly{args.n_layer}_hd{args.n_head}_ff{args.d_ff}_do{do_tag}"
+        f"_bs{args.batch_size}_ep{args.num_epochs}_len{args.max_length}_vocab{args.vocab_min_freq}"
+    )
     if args.max_train_examples:
         run_name += f"_train{args.max_train_examples}"
     if args.max_val_examples and args.max_val_examples != 10000:
@@ -591,6 +608,14 @@ def main():
     config = ModelConfig()
     config.vocab_size = vocab_size
     config.max_len = args.max_length
+    config.d_model = args.d_model
+    config.n_layer = args.n_layer
+    config.n_head = args.n_head
+    config.d_ff = args.d_ff
+    config.dropout = args.dropout
+
+    if config.d_model % config.n_head != 0:
+        raise ValueError(f"d_model ({config.d_model}) must be divisible by n_head ({config.n_head})")
     
     # Warn if vocab is very large
     if vocab_size > 50000:

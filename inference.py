@@ -98,13 +98,18 @@ def main():
     
     args = parser.parse_args()
     
-    # Try to load training parameters from run directory
+    # Auto-detect vocab and training params from model directory
     model_dir = os.path.dirname(os.path.abspath(args.model_path))
     training_params_path = os.path.join(model_dir, 'training_params.json')
+
+    run_vocab_path = os.path.join(model_dir, 'vocab.json')
+    if os.path.exists(run_vocab_path):
+        args.vocab_path = run_vocab_path
+        print(f"Using vocab from model directory: {args.vocab_path}")
     
     config = ModelConfig()
     
-    # If training parameters exist, use them to set max_length
+    # If training parameters exist, use them to set max_length / architecture
     if os.path.exists(training_params_path):
         print(f"Loading training parameters from {training_params_path}...")
         with open(training_params_path, 'r') as f:
@@ -112,6 +117,9 @@ def main():
         if 'max_length' in training_params:
             config.max_len = training_params['max_length']
             print(f"Using max_length={config.max_len} from training parameters")
+        for k in ['d_model', 'n_layer', 'n_head', 'd_ff', 'dropout']:
+            if k in training_params:
+                setattr(config, k, training_params[k])
     
     # Load vocabulary to get actual vocab size
     with open(args.vocab_path, 'r') as f:

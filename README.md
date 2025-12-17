@@ -1,8 +1,7 @@
 # CS559 Code Completion Project
 
-## Team
-- Mayasah Lami (22401352)
-- Alireza Dastmalchi Saei (22404076)
+(Add your names here guys)
+22401352 - Mayasah Lami
 
 Code completion model using transformer architecture trained on Python code from the py150 dataset.
 
@@ -134,11 +133,13 @@ The `create_completion_datasets.py` script creates task-specific datasets:
    ```bash
    python train_v2.py \
        --task token \
-       --vocab_min_freq 25 \
-       --batch_size 32 \
+       --batch_size 16 \
+       --accumulation_steps 4 \
+       --vocab_min_freq 20 \
        --num_epochs 15 \
        --max_length 256 \
-       --max_train_examples 200000 \
+       --max_train_examples 150000 \
+       --weight_decay 0.02 \
        --device cuda
    ```
 
@@ -146,8 +147,9 @@ The `create_completion_datasets.py` script creates task-specific datasets:
    ```bash
    python train_v2.py \
        --task line \
-       --vocab_min_freq 25 \
-       --batch_size 32 \
+       --vocab_min_freq 20 \
+       --batch_size 16 \
+       --accumulation_steps 4 \
        --num_epochs 15 \
        --max_length 256 \
        --max_train_examples 200000 \
@@ -180,6 +182,13 @@ The `create_completion_datasets.py` script creates task-specific datasets:
 - `--learning_rate`: Learning rate (default: 1e-4)
 - `--weight_decay`: Weight decay / L2 regularization (default: 0.01)
 - `--accumulation_steps`: Gradient accumulation steps (default: 1, use >1 to reduce GPU memory)
+
+**Model architecture (optional overrides):**
+- `--d_model`: Transformer width / embedding dimension
+- `--n_layer`: Number of transformer blocks (depth)
+- `--n_head`: Number of attention heads (**must divide `d_model`**)
+- `--d_ff`: Feed-forward (MLP) hidden dimension
+- `--dropout`: Dropout probability
 
 **Vocabulary arguments:**
 - `--vocab_min_freq`: Minimum token frequency for vocabulary (default: 10, higher = smaller vocab)
@@ -263,10 +272,10 @@ python evaluate.py \
 ```bash
 # Limit test examples for faster evaluation
 python evaluate.py \
-    --model_path runs/run_token_v2_bs32_ep15_len256_vocab25_20240101_120000/best_model.pt \
+    --model_path runs/run_line_v2_bs16_ep15_len256_vocab20_train200000_acc4_20251216_193432/best_model_line_level.pt \
     --task token \
     --max_test_examples 50000 \
-    --num_workers 0 \
+    --num_workers 2 \
     --device cuda
 ```
 
