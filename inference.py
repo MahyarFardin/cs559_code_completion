@@ -26,7 +26,13 @@ def load_model(model_path, vocab_path, config=None, device='cuda'):
     
     # Create model with correct configuration
     model = CodeCompletionTransformer(config)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    loaded_obj = torch.load(model_path, map_location=device)
+    # Support both raw state_dict and full checkpoints
+    if isinstance(loaded_obj, dict) and 'model_state_dict' in loaded_obj:
+        state_dict = loaded_obj['model_state_dict']
+    else:
+        state_dict = loaded_obj
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
     

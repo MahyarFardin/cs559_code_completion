@@ -159,9 +159,10 @@ def main():
                         help="Maximum prefix ratio (0-1) for line-level dataset")
     parser.add_argument("--examples_per_line", type=int, default=1,
                         help="Number of examples to create per line (default: 1)")
-    parser.add_argument("--token_level", action="store_true", default=True,
+    # If neither flag is provided, default to creating BOTH datasets (backwards compatible).
+    parser.add_argument("--token_level", action="store_true", default=False,
                         help="Create token-level dataset")
-    parser.add_argument("--line_level", action="store_true", default=True,
+    parser.add_argument("--line_level", action="store_true", default=False,
                         help="Create line-level dataset")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of sequences to process (for testing)")
@@ -169,6 +170,11 @@ def main():
                         help="Process sequences in chunks to save memory")
     
     args = parser.parse_args()
+
+    # Backwards-compatible default: if user didn't choose, create both.
+    if not args.token_level and not args.line_level:
+        args.token_level = True
+        args.line_level = True
     
     # Create output directories
     os.makedirs(args.output_dir, exist_ok=True)

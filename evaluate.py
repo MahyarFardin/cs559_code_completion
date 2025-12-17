@@ -175,7 +175,15 @@ def main():
     # Load model (map to CPU first to avoid device mismatch errors)
     map_location = 'cpu' if args.device == 'cpu' else args.device
     model = CodeCompletionTransformer(config)
-    model.load_state_dict(torch.load(args.model_path, map_location=map_location))
+    loaded_obj = torch.load(args.model_path, map_location=map_location)
+    # Support both:
+    # - raw state_dict files: torch.save(model.state_dict(), path)
+    # - full checkpoints: torch.save({'model_state_dict': ..., ...}, path)
+    if isinstance(loaded_obj, dict) and 'model_state_dict' in loaded_obj:
+        state_dict = loaded_obj['model_state_dict']
+    else:
+        state_dict = loaded_obj
+    model.load_state_dict(state_dict)
     model = model.to(args.device)
     model.eval()
     
