@@ -123,10 +123,9 @@ class CodeCompletionTransformer(nn.Module):
 
         return logits
 
-## comment the lines below before running!!!!!!!!!
-config = ModelConfig()
-model = CodeCompletionTransformer(config)
-
-dummy_input = torch.randint(0, config.vocab_size, (4, config.max_len))
-
-model(dummy_input).shape
+if __name__ == "__main__":
+    # Quick sanity check: run a dummy forward pass
+    config = ModelConfig()
+    model = CodeCompletionTransformer(config)
+    dummy_input = torch.randint(0, config.vocab_size, (4, config.max_len))
+    print(model(dummy_input).shape)
