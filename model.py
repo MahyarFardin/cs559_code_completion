@@ -4,12 +4,12 @@ import torch.nn.functional as F
 
 class ModelConfig:
     vocab_size = 32000
-    d_model = 512
-    n_layer = 6
+    d_model = 348
+    n_layer = 4
     n_head = 8
-    d_ff = 2048
+    d_ff = 1392
     max_len = 256
-    dropout = 0.1
+    dropout = 0.2
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
