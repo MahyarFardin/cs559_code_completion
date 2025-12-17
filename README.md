@@ -1,7 +1,8 @@
 # CS559 Code Completion Project
 
-(Add your names here guys)
-22401352 - Mayasah Lami
+## Team
+- Mayasah Lami (22401352)
+- Alireza Dastmalchi Saei (22404076)
 
 Code completion model using transformer architecture trained on Python code from the py150 dataset.
 
