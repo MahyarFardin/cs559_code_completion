@@ -154,16 +154,26 @@ class TokenLevelDataset(Dataset):
         target = example['target']
         
         # Create input sequence: context + target
+        #
+        # IMPORTANT:
+        # We will train/evaluate using the logits at the *last context token* position
+        # to predict `target`. Do NOT use logits at the last position.
         input_tokens = context + [target]
+        
+        # If sequence is too long, keep most recent tokens so `target` stays last.
+        if len(input_tokens) > self.max_length:
+            input_tokens = input_tokens[-self.max_length:]
         
         # Encode to indices
         input_ids = self.vocab.encode(input_tokens, max_length=self.max_length, pad=True)
         target_idx = self.vocab.token_to_idx.get(target, self.vocab.token_to_idx['<UNK>'])
         
+        context_length = max(0, len(input_tokens) - 1)
+        
         return {
             'input_ids': torch.tensor(input_ids, dtype=torch.long),
             'target': torch.tensor(target_idx, dtype=torch.long),
-            'context_length': len(context)
+            'context_length': context_length
         }
 
 class LineLevelDataset(Dataset):
@@ -263,9 +273,11 @@ def collate_token_level(batch):
     """Collate function for token-level dataset."""
     input_ids = torch.stack([item['input_ids'] for item in batch])
     targets = torch.stack([item['target'] for item in batch])
+    context_lengths = torch.tensor([item['context_length'] for item in batch], dtype=torch.long)
     return {
         'input_ids': input_ids,
-        'targets': targets
+        'targets': targets,
+        'context_lengths': context_lengths
     }
 
 def collate_line_level(batch):
@@ -295,15 +307,20 @@ def train_token_level(model, train_loader, val_loader, config, num_epochs=10, de
         for batch in train_pbar:
             input_ids = batch['input_ids'].to(device)
             targets = batch['targets'].to(device)
+            context_lengths = batch.get('context_lengths', None)
             
             # Forward pass
             logits = model(input_ids)  # [B, T, vocab_size]
             
-            # Get logits for last position (next token prediction)
-            last_logits = logits[:, -1, :]  # [B, vocab_size]
+            # Predict next token using logits at last *context token* position
+            if context_lengths is None:
+                pred_logits = logits[:, -1, :]
+            else:
+                pos = (context_lengths.to(device) - 1).clamp(min=0)
+                pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]
             
             # Compute loss
-            loss = criterion(last_logits, targets)
+            loss = criterion(pred_logits, targets)
             
             # Backward pass
             optimizer.zero_grad()
@@ -324,10 +341,15 @@ def train_token_level(model, train_loader, val_loader, config, num_epochs=10, de
             for batch in val_pbar:
                 input_ids = batch['input_ids'].to(device)
                 targets = batch['targets'].to(device)
+                context_lengths = batch.get('context_lengths', None)
                 
                 logits = model(input_ids)
-                last_logits = logits[:, -1, :]
-                loss = criterion(last_logits, targets)
+                if context_lengths is None:
+                    pred_logits = logits[:, -1, :]
+                else:
+                    pos = (context_lengths.to(device) - 1).clamp(min=0)
+                    pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]
+                loss = criterion(pred_logits, targets)
                 
                 val_loss += loss.item()
                 val_pbar.set_postfix({'loss': loss.item()})

@@ -28,17 +28,22 @@ def evaluate_token_level(model, test_loader, device='cuda'):
         for batch in tqdm(test_loader, desc="Evaluating"):
             input_ids = batch['input_ids'].to(device)
             targets = batch['targets'].to(device)
+            context_lengths = batch.get('context_lengths', None)
             
             # Forward pass
             logits = model(input_ids)
-            last_logits = logits[:, -1, :]  # [B, vocab_size]
+            if context_lengths is None:
+                pred_logits = logits[:, -1, :]
+            else:
+                pos = (context_lengths.to(device) - 1).clamp(min=0)
+                pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]
             
             # Compute loss
-            loss = criterion(last_logits, targets)
+            loss = criterion(pred_logits, targets)
             total_loss += loss.item()
             
             # Compute accuracy
-            predictions = torch.argmax(last_logits, dim=-1)
+            predictions = torch.argmax(pred_logits, dim=-1)
             correct = (predictions == targets).sum().item()
             total_correct += correct
             total_tokens += targets.size(0)

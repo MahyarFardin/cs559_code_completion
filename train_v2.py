@@ -154,16 +154,30 @@ class TokenLevelDataset(Dataset):
         target = example['target']
         
         # Create input sequence: context + target
+        #
+        # IMPORTANT:
+        # We will train/evaluate using the logits at the *last context token* position
+        # to predict `target`. We still append `target` here so the sequence length is
+        # context_length+1, but we must NOT take logits from the final position (which
+        # would correspond to the target token itself or padding).
         input_tokens = context + [target]
+        
+        # If sequence is too long, keep the most recent tokens so that the target
+        # remains at the end of the sequence.
+        if len(input_tokens) > self.max_length:
+            input_tokens = input_tokens[-self.max_length:]
         
         # Encode to indices
         input_ids = self.vocab.encode(input_tokens, max_length=self.max_length, pad=True)
         target_idx = self.vocab.token_to_idx.get(target, self.vocab.token_to_idx['<UNK>'])
         
+        # Context length AFTER any truncation above (target is the final token)
+        context_length = max(0, len(input_tokens) - 1)
+        
         return {
             'input_ids': torch.tensor(input_ids, dtype=torch.long),
             'target': torch.tensor(target_idx, dtype=torch.long),
-            'context_length': len(context)
+            'context_length': context_length
         }
 
 
@@ -171,9 +185,11 @@ def collate_token_level(batch):
     """Collate function for token-level dataset."""
     input_ids = torch.stack([item['input_ids'] for item in batch])
     targets = torch.stack([item['target'] for item in batch])
+    context_lengths = torch.tensor([item['context_length'] for item in batch], dtype=torch.long)
     return {
         'input_ids': input_ids,
-        'targets': targets
+        'targets': targets,
+        'context_lengths': context_lengths
     }
 
 
@@ -292,13 +308,20 @@ def train_epoch_token(model, train_loader, optimizer, criterion, device, accumul
     for batch_idx, batch in enumerate(pbar):
         input_ids = batch['input_ids'].to(device)
         targets = batch['targets'].to(device)
+        context_lengths = batch.get('context_lengths', None)
         
         # Forward pass
         logits = model(input_ids)  # [B, T, vocab_size]
-        last_logits = logits[:, -1, :]  # [B, vocab_size] - next token prediction
+        # Use logits at the last *context token* position to predict the target token.
+        # (Using logits[:, -1, :] would either correspond to the target token itself or padding.)
+        if context_lengths is None:
+            pred_logits = logits[:, -1, :]  # Back-compat fallback
+        else:
+            pos = (context_lengths.to(device) - 1).clamp(min=0)  # [B]
+            pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]  # [B, vocab]
         
         # Compute loss
-        loss = criterion(last_logits, targets)
+        loss = criterion(pred_logits, targets)
         
         # Scale loss for gradient accumulation
         loss = loss / accumulation_steps
@@ -419,17 +442,22 @@ def validate_token(model, val_loader, criterion, device):
         for batch in pbar:
             input_ids = batch['input_ids'].to(device)
             targets = batch['targets'].to(device)
+            context_lengths = batch.get('context_lengths', None)
             
             # Forward pass
             logits = model(input_ids)
-            last_logits = logits[:, -1, :]
+            if context_lengths is None:
+                pred_logits = logits[:, -1, :]
+            else:
+                pos = (context_lengths.to(device) - 1).clamp(min=0)
+                pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]
             
             # Compute loss
-            loss = criterion(last_logits, targets)
+            loss = criterion(pred_logits, targets)
             total_loss += loss.item()
             
             # Compute accuracy
-            predictions = torch.argmax(last_logits, dim=-1)
+            predictions = torch.argmax(pred_logits, dim=-1)
             correct = (predictions == targets).sum().item()
             total_correct += correct
             total_tokens += targets.size(0)
