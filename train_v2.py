@@ -161,24 +161,26 @@ class TokenLevelDataset(Dataset):
         # to predict `target`. We still append `target` here so the sequence length is
         # context_length+1, but we must NOT take logits from the final position (which
         # would correspond to the target token itself or padding).
-        input_tokens = context + [target]
-        
-        # If sequence is too long, keep the most recent tokens so that the target
-        # remains at the end of the sequence.
+        # input is ONLY the context
+        input_tokens = context
+
+        # If sequence is too long, keep the most recent tokens
         if len(input_tokens) > self.max_length:
             input_tokens = input_tokens[-self.max_length:]
-        
-        # Encode to indices
+
+        # Encode context
         input_ids = self.vocab.encode(input_tokens, max_length=self.max_length, pad=True)
+
+        # Encode target as the next-token label
         target_idx = self.vocab.token_to_idx.get(target, self.vocab.token_to_idx['<UNK>'])
-        
-        # Context length AFTER any truncation above (target is the final token)
-        context_length = max(0, len(input_tokens) - 1)
-        
+
+        # Context length after truncation (no target inside input)
+        context_length = len(input_tokens)
+
         return {
             'input_ids': torch.tensor(input_ids, dtype=torch.long),
-            'target': torch.tensor(target_idx, dtype=torch.long),
-            'context_length': context_length
+            'targets': torch.tensor(target_idx, dtype=torch.long),   # <- match train_v2.py expects 'targets'
+            'context_lengths': torch.tensor(context_length, dtype=torch.long)  # <- optional, but match naming
         }
 
 
@@ -553,7 +555,7 @@ def main():
                         help="Maximum sequence length (context length for line-level)")
     parser.add_argument("--max_suffix_length", type=int, default=64,
                         help="Maximum suffix length for line-level task")
-    parser.add_argument("--learning_rate", type=float, default=1e-4,
+    parser.add_argument("--learning_rate", type=float, default=3e-4,
                         help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="Weight decay (L2 regularization)")
@@ -577,7 +579,7 @@ def main():
     # Vocabulary arguments
     parser.add_argument("--vocab_min_freq", type=int, default=10,
                         help="Minimum frequency for vocabulary tokens")
-    parser.add_argument("--vocab_sample_lines", type=int, default=50000,
+    parser.add_argument("--vocab_sample_lines", type=int, default=100000,
                         help="Sample N lines for vocabulary building")
     
     # Data loading arguments
