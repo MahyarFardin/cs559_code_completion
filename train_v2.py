@@ -187,8 +187,10 @@ class TokenLevelDataset(Dataset):
 def collate_token_level(batch):
     """Collate function for token-level dataset."""
     input_ids = torch.stack([item['input_ids'] for item in batch])
-    targets = torch.stack([item['target'] for item in batch])
-    context_lengths = torch.tensor([item['context_length'] for item in batch], dtype=torch.long)
+    targets = torch.stack([item['targets'] for item in batch])
+    # context_lengths is already a tensor from dataset, just stack them
+    context_lengths = torch.stack([item['context_lengths'] for item in batch])
+    assert input_ids.ndim == 2 and targets.ndim == 1 and context_lengths.ndim == 1
     return {
         'input_ids': input_ids,
         'targets': targets,
@@ -315,11 +317,12 @@ def train_epoch_token(model, train_loader, optimizer, criterion, device, accumul
         
         # Forward pass
         logits = model(input_ids)  # [B, T, vocab_size]
-        # Use logits at the last *context token* position to predict the target token.
-        # (Using logits[:, -1, :] would either correspond to the target token itself or padding.)
+        # Use logits at the last context token position to predict the target token.
+        # Input is only context (no target), so we use context_lengths - 1 to get the last context token.
         if context_lengths is None:
-            pred_logits = logits[:, -1, :]  # Back-compat fallback
+            pred_logits = logits[:, -1, :]  # Back-compat fallback (uses last position, might be padding)
         else:
+            # context_lengths gives actual context length, so last context token is at index (context_lengths - 1)
             pos = (context_lengths.to(device) - 1).clamp(min=0)  # [B]
             pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]  # [B, vocab]
         
@@ -457,11 +460,12 @@ def validate_token(model, val_loader, criterion, device):
             
             # Forward pass
             logits = model(input_ids)
+            # Input is only context, use context_lengths - 1 to get last context token position
             if context_lengths is None:
-                pred_logits = logits[:, -1, :]
+                pred_logits = logits[:, -1, :]  # Back-compat fallback
             else:
-                pos = (context_lengths.to(device) - 1).clamp(min=0)
-                pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]
+                pos = (context_lengths.to(device) - 1).clamp(min=0)  # [B]
+                pred_logits = logits[torch.arange(logits.size(0), device=device), pos, :]  # [B, vocab]
             
             # Compute loss
             loss = criterion(pred_logits, targets)
