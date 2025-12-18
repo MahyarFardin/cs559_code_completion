@@ -61,43 +61,75 @@ def evaluate_line_level(model, test_loader, config, device='cuda'):
     """Evaluate line-level model on test set."""
     model.eval()
     criterion = nn.CrossEntropyLoss(ignore_index=0)
+    pad_idx = 0
     
     total_loss = 0
-    total_tokens = 0
+    num_batches = 0
+    exact_correct = 0
+    exact_total = 0
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating"):
             context_ids = batch['context_ids'].to(device)
             suffix_ids = batch['suffix_ids'].to(device)
             
-            # Predict suffix tokens sequentially
+            steps = suffix_ids.size(1) - 1
+            if steps <= 0:
+                continue
+            
+            target_block = suffix_ids[:, :steps]
+            total_valid_tokens = (target_block != pad_idx).sum().item()
+            if total_valid_tokens == 0:
+                continue
+            
+            # Track exact match for each example in batch
+            exact_ok = torch.ones(context_ids.size(0), dtype=torch.bool, device=device)
+            any_valid = torch.zeros(context_ids.size(0), dtype=torch.bool, device=device)
+            
             current_input = context_ids
             batch_loss = 0
-            batch_tokens = 0
             
-            for i in range(suffix_ids.size(1) - 1):
+            for i in range(steps):
+                next_target = suffix_ids[:, i]
+                mask = (next_target != pad_idx)
+                
+                if not mask.any():
+                    break
+                
                 logits = model(current_input)
                 next_logits = logits[:, -1, :]
-                next_target = suffix_ids[:, i]
+                predictions = torch.argmax(next_logits, dim=-1)
                 
-                loss = criterion(next_logits, next_target)
-                batch_loss += loss.item()
-                batch_tokens += 1
+                loss_step = criterion(next_logits[mask], next_target[mask])
+                valid_here = mask.sum().item()
+                batch_loss += loss_step.item() * (valid_here / total_valid_tokens)
                 
-                # Append predicted token for next step
+                # Track exact match: all predictions must match targets for valid tokens
+                any_valid |= mask
+                exact_ok[mask] &= (predictions[mask] == next_target[mask])
+                
+                # Append predicted token for next step (teacher forcing for consistency)
                 next_token = suffix_ids[:, i:i+1]
                 current_input = torch.cat([current_input, next_token], dim=1)
                 if current_input.size(1) > config.max_len:
                     current_input = current_input[:, -config.max_len:]
             
-            total_loss += batch_loss / batch_tokens if batch_tokens > 0 else 0
-            total_tokens += 1
+            # Count exact matches for examples with at least one valid token
+            valid_examples = any_valid.sum().item()
+            if valid_examples > 0:
+                exact_correct += (exact_ok & any_valid).sum().item()
+                exact_total += valid_examples
+            
+            total_loss += batch_loss
+            num_batches += 1
     
-    avg_loss = total_loss / len(test_loader)
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    exact_match_acc = exact_correct / max(1, exact_total)
     
     return {
         'loss': avg_loss,
-        'total_examples': total_tokens
+        'exact_match_accuracy': exact_match_acc,
+        'total_examples': exact_total
     }
 
 def main():
@@ -337,6 +369,7 @@ def main():
         print("TEST SET RESULTS (Line-Level)")
         print("="*50)
         print(f"Test Loss: {results['loss']:.4f}")
+        print(f"Exact Match Accuracy: {results['exact_match_accuracy']*100:.2f}%")
         print(f"Total Examples: {results['total_examples']:,}")
         print("="*50)
     

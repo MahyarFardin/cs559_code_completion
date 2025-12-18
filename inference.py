@@ -32,7 +32,23 @@ def load_model(model_path, vocab_path, config=None, device='cuda'):
         state_dict = loaded_obj['model_state_dict']
     else:
         state_dict = loaded_obj
-    model.load_state_dict(state_dict)
+    
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError as e:
+        if "size mismatch" in str(e) or "shape" in str(e).lower():
+            print("\n" + "="*60)
+            print("ERROR: Model architecture mismatch!")
+            print("="*60)
+            print("The saved model has a different architecture than the config being used.")
+            print(f"\nAttempted config: d_model={config.d_model}, n_layer={config.n_layer}, "
+                  f"n_head={config.n_head}, d_ff={config.d_ff}, vocab_size={config.vocab_size}")
+            print("\nTo fix this, check what architecture was used during training.")
+            print("If training_params.json is missing architecture params, the model likely used:")
+            print("  - Classic defaults: d_model=512, n_layer=6, n_head=8, d_ff=2048")
+            print("  - Or check ModelConfig defaults at training time")
+            print("="*60)
+        raise
     model = model.to(device)
     model.eval()
     
@@ -109,7 +125,13 @@ def main():
     
     config = ModelConfig()
     
+    # Load vocabulary to get actual vocab size first
+    with open(args.vocab_path, 'r') as f:
+        vocab_data = json.load(f)
+    config.vocab_size = len(vocab_data['token_to_idx'])
+    
     # If training parameters exist, use them to set max_length / architecture
+    training_params = None
     if os.path.exists(training_params_path):
         print(f"Loading training parameters from {training_params_path}...")
         with open(training_params_path, 'r') as f:
@@ -117,17 +139,34 @@ def main():
         if 'max_length' in training_params:
             config.max_len = training_params['max_length']
             print(f"Using max_length={config.max_len} from training parameters")
-        for k in ['d_model', 'n_layer', 'n_head', 'd_ff', 'dropout']:
-            if k in training_params:
-                setattr(config, k, training_params[k])
+        
+        # Load architecture params if available
+        has_arch_params = any(k in training_params for k in ['d_model', 'n_layer', 'n_head', 'd_ff', 'dropout'])
+        if has_arch_params:
+            for k in ['d_model', 'n_layer', 'n_head', 'd_ff', 'dropout']:
+                if k in training_params:
+                    setattr(config, k, training_params[k])
+        else:
+            # Old runs likely used these defaults (before architecture flags existed)
+            print("Warning: training_params.json missing architecture params. Using classic defaults:")
+            print("  d_model=512, n_layer=6, n_head=8, d_ff=2048, dropout=0.1")
+            config.d_model = 512
+            config.n_layer = 6
+            config.n_head = 8
+            config.d_ff = 2048
+            config.dropout = 0.1
+    else:
+        # No training_params.json, use classic defaults
+        print("No training_params.json found. Using classic defaults:")
+        print("  d_model=512, n_layer=6, n_head=8, d_ff=2048, dropout=0.1")
+        config.d_model = 512
+        config.n_layer = 6
+        config.n_head = 8
+        config.d_ff = 2048
+        config.dropout = 0.1
     
-    # Load vocabulary to get actual vocab size
-    with open(args.vocab_path, 'r') as f:
-        vocab_data = json.load(f)
-    
-    # Set vocab_size from actual vocabulary
-    config.vocab_size = len(vocab_data['token_to_idx'])
-    print(f"Using vocab_size={config.vocab_size} from vocabulary file")
+    print(f"Model config: d_model={config.d_model}, n_layer={config.n_layer}, n_head={config.n_head}, "
+          f"d_ff={config.d_ff}, dropout={config.dropout}, vocab_size={config.vocab_size}, max_len={config.max_len}")
     
     # Load model and vocabulary
     print("Loading model...")

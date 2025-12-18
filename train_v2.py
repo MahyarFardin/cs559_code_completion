@@ -492,6 +492,9 @@ def validate_line(model, val_loader, criterion, config, device):
     num_batches = 0
     pad_idx = 0
     
+    exact_correct = 0
+    exact_total = 0
+    
     with torch.no_grad():
         pbar = tqdm(val_loader, desc="Validation")
         for batch in pbar:
@@ -507,6 +510,10 @@ def validate_line(model, val_loader, criterion, config, device):
             if total_valid_tokens == 0:
                 continue
             
+            # Track exact match for each example in batch
+            exact_ok = torch.ones(context_ids.size(0), dtype=torch.bool, device=device)
+            any_valid = torch.zeros(context_ids.size(0), dtype=torch.bool, device=device)
+            
             current_input = context_ids
             batch_loss_value = 0.0
             
@@ -519,24 +526,36 @@ def validate_line(model, val_loader, criterion, config, device):
                 
                 logits = model(current_input)
                 next_logits = logits[:, -1, :]
+                predictions = torch.argmax(next_logits, dim=-1)
+                
                 loss_step = criterion(next_logits[mask], next_target[mask])
                 
                 valid_here = mask.sum().item()
                 loss_scaled = loss_step * (valid_here / total_valid_tokens)
                 batch_loss_value += float(loss_scaled.item())
                 
+                # Track exact match: all predictions must match targets for valid tokens
+                any_valid |= mask
+                exact_ok[mask] &= (predictions[mask] == next_target[mask])
+                
                 next_token = suffix_ids[:, i:i+1]
                 current_input = torch.cat([current_input, next_token], dim=1)
                 if current_input.size(1) > config.max_len:
                     current_input = current_input[:, -config.max_len:]
+            
+            # Count exact matches for examples with at least one valid token
+            valid_examples = any_valid.sum().item()
+            if valid_examples > 0:
+                exact_correct += (exact_ok & any_valid).sum().item()
+                exact_total += valid_examples
             
             total_loss += batch_loss_value
             num_batches += 1
             pbar.set_postfix({'loss': batch_loss_value})
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    # Line-level doesn't have a simple accuracy metric
-    return avg_loss, None
+    exact_match_acc = exact_correct / max(1, exact_total)
+    return avg_loss, exact_match_acc
 
 
 def main():
