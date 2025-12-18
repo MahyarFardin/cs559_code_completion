@@ -54,8 +54,20 @@ def load_model(model_path, vocab_path, config=None, device='cuda'):
     
     return model, vocab, config
 
-def predict_next_token(model, vocab, context_tokens, device='cuda', top_k=5):
-    """Predict next token given context."""
+def predict_next_token(model, vocab, context_tokens, device='cuda', top_k=5, bottom_k=0):
+    """Predict next token given context.
+    
+    Args:
+        model: The trained model
+        vocab: Vocabulary object
+        context_tokens: List of tokens as context
+        device: Device to run inference on
+        top_k: Number of top predictions to return
+        bottom_k: Number of bottom (lowest probability) predictions to return as negative samples
+    
+    Returns:
+        tuple: (top_predictions, bottom_predictions) where each is a list of (token, prob) tuples
+    """
     # Encode context
     context_ids = vocab.encode(context_tokens, max_length=model.config.max_len, pad=True)
     input_ids = torch.tensor([context_ids], dtype=torch.long).to(device)
@@ -69,12 +81,20 @@ def predict_next_token(model, vocab, context_tokens, device='cuda', top_k=5):
         probs = torch.softmax(last_logits, dim=-1)
         top_probs, top_indices = torch.topk(probs, top_k)
         
-        predictions = []
+        top_predictions = []
         for prob, idx in zip(top_probs, top_indices):
             token = vocab.idx_to_token[idx.item()]
-            predictions.append((token, prob.item()))
+            top_predictions.append((token, prob.item()))
+        
+        # Get bottom-k predictions (negative samples)
+        bottom_predictions = []
+        if bottom_k > 0:
+            bottom_probs, bottom_indices = torch.topk(probs, bottom_k, largest=False)
+            for prob, idx in zip(bottom_probs, bottom_indices):
+                token = vocab.idx_to_token[idx.item()]
+                bottom_predictions.append((token, prob.item()))
     
-    return predictions
+    return top_predictions, bottom_predictions
 
 def complete_line(model, vocab, context_tokens, max_tokens=20, device='cuda'):
     """Complete a line given context."""
@@ -82,8 +102,8 @@ def complete_line(model, vocab, context_tokens, max_tokens=20, device='cuda'):
     completed = []
     
     for _ in range(max_tokens):
-        predictions = predict_next_token(model, vocab, current_tokens, device, top_k=1)
-        next_token = predictions[0][0]
+        top_predictions, _ = predict_next_token(model, vocab, current_tokens, device, top_k=1)
+        next_token = top_predictions[0][0]
         
         # Stop at EOL or end token
         if next_token in ['<EOL>', '</s>', '<PAD>']:
@@ -110,6 +130,8 @@ def main():
                         help="Input context (space-separated tokens)")
     parser.add_argument("--top_k", type=int, default=5,
                         help="Number of top predictions to show")
+    parser.add_argument("--bottom_k", type=int, default=0,
+                        help="Number of bottom (lowest probability) predictions to show as negative samples")
     parser.add_argument("--device", type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     
     args = parser.parse_args()
@@ -180,9 +202,16 @@ def main():
         # Token-level prediction
         print(f"\nContext: {' '.join(context_tokens)}")
         print("\nTop predictions for next token:")
-        predictions = predict_next_token(model, vocab, context_tokens, args.device, args.top_k)
-        for i, (token, prob) in enumerate(predictions, 1):
+        top_predictions, bottom_predictions = predict_next_token(
+            model, vocab, context_tokens, args.device, args.top_k, args.bottom_k
+        )
+        for i, (token, prob) in enumerate(top_predictions, 1):
             print(f"  {i}. {token} (prob: {prob:.4f})")
+        
+        if bottom_predictions and args.bottom_k > 0:
+            print(f"\nBottom predictions (negative samples - least likely tokens):")
+            for i, (token, prob) in enumerate(bottom_predictions, 1):
+                print(f"  {i}. {token} (prob: {prob:.4f})")
     
     else:
         # Line-level completion
