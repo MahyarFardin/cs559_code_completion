@@ -82,6 +82,11 @@ def py_tokenize(args, file_name, file_type):
 
         if ct % 10000 == 0:
             print(f"{file_type}: {ct} are done")
+    
+    # Print final count for files with fewer than 10000 items
+    if ct % 10000 != 0:
+        print(f"{file_type}: {ct + 1} are done")
+    
     wf.close()
 
 
@@ -96,16 +101,33 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    train_paths = open(os.path.join(args.base_dir, "python100k_train.txt")).readlines()[:-5000]
-    dev_paths = open(os.path.join(args.base_dir, "python100k_train.txt")).readlines()[-5000:]
-    wf = open(os.path.join(args.base_dir, "python95k_train.txt"), "w")
+    # Create train and dev splits from python100k_train.txt
+    train_file_path = os.path.join(args.base_dir, "python100k_train.txt")
+    if not os.path.exists(train_file_path):
+        raise FileNotFoundError(f"Required file not found: {train_file_path}")
+    
+    train_paths = open(train_file_path).readlines()[:-5000]
+    dev_paths = open(train_file_path).readlines()[-5000:]
+    
+    # Write split files to base_dir
+    python95k_train_path = os.path.join(args.base_dir, "python95k_train.txt")
+    python5k_dev_path = os.path.join(args.base_dir, "python5k_dev.txt")
+    
+    wf = open(python95k_train_path, "w")
     for path in train_paths:
         wf.write(path)
     wf.close()
-    wf = open(os.path.join(args.base_dir, "python5k_dev.txt"), "w")
+    
+    wf = open(python5k_dev_path, "w")
     for path in dev_paths:
         wf.write(path)
     wf.close()
+    
+    # Verify files exist before processing
+    if not os.path.exists(python5k_dev_path):
+        raise FileNotFoundError(f"Dev file was not created: {python5k_dev_path}")
+    
+    print(f"Created split files: {len(train_paths)} train, {len(dev_paths)} dev")
 
     py_tokenize(args, file_name="python95k_train.txt", file_type="train")
     py_tokenize(args, file_name="python5k_dev.txt", file_type="dev")
