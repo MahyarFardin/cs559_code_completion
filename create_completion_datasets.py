@@ -194,12 +194,28 @@ def main():
     if args.line_level:
         os.makedirs(os.path.join(args.output_dir, "line_level"), exist_ok=True)
     
+    # Check which input files exist before processing
+    print(f"\nChecking for input files in: {args.input_dir}")
+    expected_files = ["train.txt", "dev.txt", "test.txt"]
+    missing_files = []
+    for split_file in expected_files:
+        full_path = os.path.join(args.input_dir, split_file)
+        if os.path.exists(full_path):
+            print(f"  ✓ Found: {split_file}")
+        else:
+            print(f"  ✗ Missing: {split_file}")
+            missing_files.append(split_file)
+    
+    if missing_files:
+        print(f"\nWarning: {len(missing_files)} file(s) missing. These will be skipped.")
+        print("Make sure preprocess.py completed successfully and created all files.")
+    
     # Process each split
     for split in ["train", "dev", "test"]:
         input_file = os.path.join(args.input_dir, f"{split}.txt")
         
         if not os.path.exists(input_file):
-            print(f"Warning: {input_file} not found, skipping...")
+            print(f"\nSkipping {split} (file not found: {input_file})")
             continue
         
         print(f"\nProcessing {split}...")
