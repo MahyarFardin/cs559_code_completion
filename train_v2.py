@@ -96,16 +96,26 @@ class TokenLevelDataset(Dataset):
         self.max_examples = max_examples
         
         if lazy_load:
-            # Count lines without loading all data
+            # Count lines without loading all data (optimized: use binary mode for faster counting)
             print(f"Counting examples in {jsonl_file}...")
             self.num_examples = 0
-            with open(jsonl_file, 'r', encoding='utf-8') as f:
-                for _ in f:
-                    self.num_examples += 1
+            # Use binary mode and buffered reading for faster counting
+            with open(jsonl_file, 'rb') as f:
+                # Use a larger buffer size for better performance
+                buf_size = 1024 * 1024  # 1MB buffer
+                read_f = f.read
+                buf = read_f(buf_size)
+                last_print = 0
+                while buf:
+                    lines_in_buf = buf.count(b'\n')
+                    self.num_examples += lines_in_buf
                     if max_examples and self.num_examples >= max_examples:
                         break
-                    if self.num_examples % 10000 == 0:
+                    # Print progress every 10000 lines
+                    if self.num_examples - last_print >= 10000:
                         print(f"  Counted {self.num_examples} examples...")
+                        last_print = self.num_examples
+                    buf = read_f(buf_size)
             if max_examples:
                 self.num_examples = min(self.num_examples, max_examples)
             print(f"Found {self.num_examples} examples (lazy loading enabled)")
@@ -210,16 +220,26 @@ class LineLevelDataset(Dataset):
         self.max_examples = max_examples
         
         if lazy_load:
-            # Count lines without loading all data
+            # Count lines without loading all data (optimized: use binary mode for faster counting)
             print(f"Counting examples in {jsonl_file}...")
             self.num_examples = 0
-            with open(jsonl_file, 'r', encoding='utf-8') as f:
-                for _ in f:
-                    self.num_examples += 1
+            # Use binary mode and buffered reading for faster counting
+            with open(jsonl_file, 'rb') as f:
+                # Use a larger buffer size for better performance
+                buf_size = 1024 * 1024  # 1MB buffer
+                read_f = f.read
+                buf = read_f(buf_size)
+                last_print = 0
+                while buf:
+                    lines_in_buf = buf.count(b'\n')
+                    self.num_examples += lines_in_buf
                     if max_examples and self.num_examples >= max_examples:
                         break
-                    if self.num_examples % 10000 == 0:
+                    # Print progress every 10000 lines
+                    if self.num_examples - last_print >= 10000:
                         print(f"  Counted {self.num_examples} examples...")
+                        last_print = self.num_examples
+                    buf = read_f(buf_size)
             if max_examples:
                 self.num_examples = min(self.num_examples, max_examples)
             print(f"Found {self.num_examples} examples (lazy loading enabled)")

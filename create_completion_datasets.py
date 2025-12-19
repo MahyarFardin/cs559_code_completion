@@ -8,6 +8,13 @@ import os
 import argparse
 import json
 from typing import List, Tuple
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 def load_tokenized_file(file_path: str, limit: int = None) -> List[List[str]]:
     """Load tokenized file and return list of token sequences."""
@@ -166,8 +173,12 @@ def main():
                         help="Create line-level dataset")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of sequences to process (for testing)")
-    parser.add_argument("--chunk_size", type=int, default=1000,
-                        help="Process sequences in chunks to save memory")
+    parser.add_argument("--chunk_size", type=int, default=5000,
+                        help="Process sequences in chunks to save memory (default: 5000, increase for faster processing on Colab)")
+    parser.add_argument("--write_batch_size", type=int, default=10000,
+                        help="Batch size for writing JSONL lines (default: 10000, larger = faster but more memory)")
+    parser.add_argument("--disable_progress", action="store_true",
+                        help="Disable progress bars (useful if redirecting output)")
     
     args = parser.parse_args()
 
@@ -203,9 +214,24 @@ def main():
             print(f"  Creating token-level dataset...")
             output_file = os.path.join(args.output_dir, "token_level", f"{split}.jsonl")
             total_examples = 0
+            write_batch = []
+            write_batch_size = args.write_batch_size
+            
+            # Count total lines for progress bar (approximate)
+            if not args.disable_progress and HAS_TQDM:
+                try:
+                    with open(input_file, 'r', encoding='utf-8') as f:
+                        total_lines = sum(1 for _ in f)
+                except:
+                    total_lines = None
+            else:
+                total_lines = None
+            
             with open(output_file, 'w', encoding='utf-8') as f, \
                  open(input_file, 'r', encoding='utf-8') as infile:
-                for line in infile:
+                iterator = tqdm(infile, total=total_lines, desc=f"    Token-level {split}", 
+                               disable=args.disable_progress or not HAS_TQDM, unit="lines")
+                for line in iterator:
                     if args.limit and sequence_count >= args.limit:
                         break
                     line = line.strip()
@@ -225,20 +251,32 @@ def main():
                                 chunk_examples = create_token_level_dataset(chunk, args.max_length)
                                 for context, target in chunk_examples:
                                     example = {"context": context, "target": target}
-                                    f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                                    json_line = json.dumps(example, ensure_ascii=False) + "\n"
+                                    write_batch.append(json_line)
+                                    
+                                    # Write batch when it reaches write_batch_size
+                                    if len(write_batch) >= write_batch_size:
+                                        f.writelines(write_batch)
+                                        write_batch = []
+                                
                                 total_examples += len(chunk_examples)
                                 chunk = []  # Clear chunk
                                 
-                                if sequence_count % (chunk_size * 10) == 0:
-                                    print(f"    Processed {sequence_count} sequences ({total_examples:,} examples so far)...")
+                                if not args.disable_progress and HAS_TQDM:
+                                    iterator.set_postfix({"examples": f"{total_examples:,}"})
                 
                 # Process remaining chunk
                 if chunk:
                     chunk_examples = create_token_level_dataset(chunk, args.max_length)
                     for context, target in chunk_examples:
                         example = {"context": context, "target": target}
-                        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                        json_line = json.dumps(example, ensure_ascii=False) + "\n"
+                        write_batch.append(json_line)
                     total_examples += len(chunk_examples)
+                
+                # Write remaining batch
+                if write_batch:
+                    f.writelines(write_batch)
             print(f"  Created {total_examples:,} token-level examples from {sequence_count} sequences -> {output_file}")
         
         # Line-level dataset - process file again (or could combine, but simpler to separate)
@@ -248,9 +286,24 @@ def main():
             total_examples = 0
             sequence_count = 0
             chunk = []
+            write_batch = []
+            write_batch_size = args.write_batch_size
+            
+            # Count total lines for progress bar (approximate)
+            if not args.disable_progress and HAS_TQDM:
+                try:
+                    with open(input_file, 'r', encoding='utf-8') as f:
+                        total_lines = sum(1 for _ in f)
+                except:
+                    total_lines = None
+            else:
+                total_lines = None
+            
             with open(output_file, 'w', encoding='utf-8') as f, \
                  open(input_file, 'r', encoding='utf-8') as infile:
-                for line in infile:
+                iterator = tqdm(infile, total=total_lines, desc=f"    Line-level {split}",
+                               disable=args.disable_progress or not HAS_TQDM, unit="lines")
+                for line in iterator:
                     if args.limit and sequence_count >= args.limit:
                         break
                     line = line.strip()
@@ -279,12 +332,19 @@ def main():
                                         "prefix": prefix,
                                         "suffix": suffix
                                     }
-                                    f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                                    json_line = json.dumps(example, ensure_ascii=False) + "\n"
+                                    write_batch.append(json_line)
+                                    
+                                    # Write batch when it reaches write_batch_size
+                                    if len(write_batch) >= write_batch_size:
+                                        f.writelines(write_batch)
+                                        write_batch = []
+                                
                                 total_examples += len(chunk_examples)
                                 chunk = []  # Clear chunk
                                 
-                                if sequence_count % (chunk_size * 10) == 0:
-                                    print(f"    Processed {sequence_count} sequences ({total_examples:,} examples so far)...")
+                                if not args.disable_progress and HAS_TQDM:
+                                    iterator.set_postfix({"examples": f"{total_examples:,}"})
                 
                 # Process remaining chunk
                 if chunk:
@@ -300,8 +360,13 @@ def main():
                             "prefix": prefix,
                             "suffix": suffix
                         }
-                        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                        json_line = json.dumps(example, ensure_ascii=False) + "\n"
+                        write_batch.append(json_line)
                     total_examples += len(chunk_examples)
+                
+                # Write remaining batch
+                if write_batch:
+                    f.writelines(write_batch)
             print(f"  Created {total_examples:,} line-level examples from {sequence_count} sequences -> {output_file}")
     
     print("\nDone!")
