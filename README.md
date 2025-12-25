@@ -1,7 +1,10 @@
 # CS559 Code Completion Project
 
-(Add your names here guys)
-22401352 - Mayasah Lami
+## Team
+- Mayasah Lami (22401352)
+- Alireza Dastmalchi Saei (22404076)
+- Utku Boran Torun (21901898)
+- Mahyar Fardinfar (22501404)
 
 Code completion model using transformer architecture trained on Python code from the py150 dataset.
 
@@ -133,13 +136,20 @@ The `create_completion_datasets.py` script creates task-specific datasets:
    ```bash
    python train_v2.py \
        --task token \
-       --batch_size 16 \
-       --accumulation_steps 4 \
-       --vocab_min_freq 20 \
+       --batch_size 32 \
+       --vocab_min_freq 50 \
        --num_epochs 15 \
        --max_length 256 \
-       --max_train_examples 150000 \
-       --weight_decay 0.02 \
+       --max_train_examples 1000000 \
+       --learning_rate 1e-4 \
+       --early_stopping_patience 3 \
+       --weight_decay 0.01 \
+       --max_val_examples 500000 \
+       --d_model 384 \
+       --n_layer 4 \
+       --n_head 6 \
+       --d_ff 1536 \
+       --dropout 0.2 \
        --device cuda
    ```
 
@@ -147,13 +157,18 @@ The `create_completion_datasets.py` script creates task-specific datasets:
    ```bash
    python train_v2.py \
        --task line \
-       --vocab_min_freq 20 \
-       --batch_size 16 \
-       --accumulation_steps 4 \
+       --vocab_min_freq 50 \
+       --batch_size 32 \
        --num_epochs 15 \
        --max_length 256 \
-       --max_train_examples 200000 \
+       --max_train_examples 2000000 \
+       --max_val_examples 100000 \
        --device cuda
+       --d_model 384 \
+       --n_layer 4 \
+       --n_head 6 \
+       --d_ff 1536 \
+       --dropout 0.2 \
    ```
 
 4. **With gradient accumulation** (if GPU memory is limited):
@@ -235,8 +250,8 @@ Predict the next token:
 
 ```bash
 python inference.py \
-    --model_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/best_model_token_level.pt \
-    --vocab_path runs/run_token_bs32_ep10_len256_vocab10_20240101_120000/vocab.json \
+    --model_path runs/run_token_v2_bs16_ep15_len256_vocab35_train200000_acc4_20251216_123055/best_model_token_level.pt \
+    --vocab_path runs/run_token_v2_bs16_ep15_len256_vocab35_train200000_acc4_20251216_123055/vocab.json \
     --task token \
     --context "from bootstrap import" \
     --top_k 5
@@ -262,9 +277,21 @@ Evaluate a trained model on the test set. The script automatically detects vocab
 ```bash
 # Simple evaluation (auto-detects vocab and max_length from run directory)
 python evaluate.py \
-    --model_path runs/run_token_v2_bs32_ep15_len256_vocab25_20240101_120000/best_model.pt \
+    --model_path runs/runs/run_4000000 \
+    --max_test_examples 200000 \
+    --num_workers 0 \
     --task token \
     --device cuda
+
+
+
+    
+
+
+
+    
+
+
 ```
 
 ### Evaluation with Options
@@ -272,10 +299,11 @@ python evaluate.py \
 ```bash
 # Limit test examples for faster evaluation
 python evaluate.py \
-    --model_path runs/run_line_v2_bs16_ep15_len256_vocab20_train200000_acc4_20251216_193432/best_model_line_level.pt \
-    --task token \
+    --model_path runs/run_line_v2_dm348_ly4_hd6_ff1392_do30_lr0.0003_wd0.01_bs16_ep15_len256_vocab50_train1000000_acc4/checkpoint_epoch_2.pt \
+    --vocab_path runs/run_line_v2_dm348_ly4_hd6_ff1392_do30_lr0.0003_wd0.01_bs16_ep15_len256_vocab50_train1000000_acc4/vocab.json \
+    --task line \
     --max_test_examples 50000 \
-    --num_workers 2 \
+    --num_workers 0 \
     --device cuda
 ```
 
