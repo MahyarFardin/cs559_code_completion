@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -32,6 +33,43 @@ from train import (
 )
 
 from rnn_model import RNNLanguageModel, RNNConfig
+
+BASELINE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASELINE_DIR, "logs")
+FIG_DIR = os.path.join(BASELINE_DIR, "figures")
+
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(FIG_DIR, exist_ok=True)
+
+
+def plot_curves(history, title, save_path):
+    epochs = range(1, len(history["train_loss"]) + 1)
+
+    plt.figure(figsize=(10, 4))
+
+    # Loss
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, history["train_loss"], label="Train")
+    plt.plot(epochs, history["val_loss"], label="Val")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Loss")
+    plt.legend()
+
+    # Accuracy
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, history["train_acc"], label="Train")
+    plt.plot(epochs, history["val_acc"], label="Val")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Accuracy")
+    plt.legend()
+
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
 
 
 def build_or_load_vocab(tokenized_dir: str,
@@ -103,6 +141,12 @@ def train_token_level_rnn(model: nn.Module,
     - Dataset provides input_ids = (context + target) padded on the right.
     - We must predict 'target' from the last *context* position, not from the last padded position.
     """
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+    }
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
@@ -185,12 +229,37 @@ def train_token_level_rnn(model: nn.Module,
         print(f"Epoch {epoch+1}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.4f} | "
               f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.4f}")
 
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
+
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), output_path)
             print(f"Saved best token-level RNN to {output_path} (val_loss={val_loss:.4f})")
 
     print(f"Token-level training complete. Best val loss: {best_val_loss:.4f}")
+
+    # ---- Save logs ----
+    run_name = f"{model.config.rnn_type}_token_h{model.config.d_model}_l{model.config.num_layers}"
+
+    log_path = os.path.join(LOG_DIR, f"{run_name}_metrics.json")
+    with open(log_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+    print(f"Saved training log to {log_path}")
+
+    # ---- Plot curves ----
+    fig_path = os.path.join(FIG_DIR, f"{run_name}_curves.png")
+    plot_curves(
+        history,
+        title=f"{model.config.rnn_type.upper()} Token-Level Training",
+        save_path=fig_path
+    )
+
+    print(f"Saved learning curves to {fig_path}")
 
 
 def train_line_level_rnn(model: nn.Module,
@@ -209,6 +278,12 @@ def train_line_level_rnn(model: nn.Module,
     - We compute loss/accuracy only on non-PAD suffix targets.
     - We avoid the "PAD-at-the-end" bug by always predicting from the last *real* token position.
     """
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+    }
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
@@ -368,6 +443,11 @@ def train_line_level_rnn(model: nn.Module,
 
         print(f"Epoch {epoch+1}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.4f} | "
               f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.4f}")
+        
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -375,6 +455,24 @@ def train_line_level_rnn(model: nn.Module,
             print(f"Saved best line-level RNN to {output_path} (val_loss={val_loss:.4f})")
 
     print(f"Line-level training complete. Best val loss: {best_val_loss:.4f}")
+
+
+    run_name = f"{model.config.rnn_type}_line_h{model.config.d_model}_l{model.config.num_layers}"
+
+    log_path = os.path.join(LOG_DIR, f"{run_name}_metrics.json")
+    with open(log_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+    print(f"Saved training log to {log_path}")
+
+    fig_path = os.path.join(FIG_DIR, f"{run_name}_curves.png")
+    plot_curves(
+        history,
+        title=f"{model.config.rnn_type.upper()} Line-Level Training",
+        save_path=fig_path
+    )
+
+    print(f"Saved learning curves to {fig_path}")
 
 
 def main():
