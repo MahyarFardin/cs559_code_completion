@@ -135,7 +135,10 @@ def train_token_level_rnn(model: nn.Module,
                           num_epochs: int = 10,
                           device: str = "cuda",
                           lr: float = 1e-3,
-                          output_path: str = "best_rnn_token_level.pt"):
+                          output_path: str = "best_rnn_token_level.pt",
+                          early_stop_patience: int = 10,
+                          early_stop_delta: float = 1e-4,
+                          ):
     """
     Token-level training:
     - Dataset provides input_ids = (context + target) padded on the right.
@@ -152,7 +155,7 @@ def train_token_level_rnn(model: nn.Module,
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
     best_val_loss = float("inf")
-
+    epochs_no_improve = 0
     for epoch in range(num_epochs):
         # -----------------
         # Train
@@ -235,10 +238,21 @@ def train_token_level_rnn(model: nn.Module,
         history["val_acc"].append(val_acc)
 
 
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss - early_stop_delta:
             best_val_loss = val_loss
+            epochs_no_improve = 0
             torch.save(model.state_dict(), output_path)
             print(f"Saved best token-level RNN to {output_path} (val_loss={val_loss:.4f})")
+        else:
+            epochs_no_improve += 1
+            print(f"No improvement for {epochs_no_improve} epoch(s)")
+
+        if epochs_no_improve >= early_stop_patience:
+            print(
+                f"Early stopping triggered at epoch {epoch+1}. "
+                f"Best val loss: {best_val_loss:.4f}"
+            )
+            break
 
     print(f"Token-level training complete. Best val loss: {best_val_loss:.4f}")
 
@@ -270,7 +284,10 @@ def train_line_level_rnn(model: nn.Module,
                          num_epochs: int = 10,
                          device: str = "cuda",
                          lr: float = 1e-3,
-                         output_path: str = "best_rnn_line_level.pt"):
+                         output_path: str = "best_rnn_line_level.pt",
+                         early_stop_patience: int = 10,
+                         early_stop_delta: float = 1e-4,
+                         ):
     """
     Line-level training (teacher forcing):
     - Start from context_ids (right-padded).
@@ -289,7 +306,7 @@ def train_line_level_rnn(model: nn.Module,
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
     best_val_loss = float("inf")
-
+    epochs_no_improve = 0
     for epoch in range(num_epochs):
         # -----------------
         # Train
@@ -449,10 +466,21 @@ def train_line_level_rnn(model: nn.Module,
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
 
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss - early_stop_delta:
             best_val_loss = val_loss
+            epochs_no_improve = 0
             torch.save(model.state_dict(), output_path)
             print(f"Saved best line-level RNN to {output_path} (val_loss={val_loss:.4f})")
+        else:
+            epochs_no_improve += 1
+            print(f"No improvement for {epochs_no_improve} epoch(s)")
+
+        if epochs_no_improve >= early_stop_patience:
+            print(
+                f"Early stopping triggered at epoch {epoch+1}. "
+                f"Best val loss: {best_val_loss:.4f}"
+            )
+            break
 
     print(f"Line-level training complete. Best val loss: {best_val_loss:.4f}")
 
@@ -500,6 +528,10 @@ def main():
     parser.add_argument("--max_val_examples", type=int, default=10000)
     parser.add_argument("--lazy_load", action="store_true", default=False)
     parser.add_argument("--num_workers", type=int, default=4)
+
+    parser.add_argument("--early_stop_patience", type=int, default=10)
+    parser.add_argument("--early_stop_delta", type=float, default=1e-4)
+
 
     # RNN-specific
     parser.add_argument("--rnn_type", type=str, choices=["rnn", "lstm", "gru"], default="lstm")
@@ -563,9 +595,15 @@ def main():
         out_path = args.output_model_path or "best_rnn_token_level.pt"
         train_token_level_rnn(
             model, train_loader, val_loader,
-            pad_idx=pad_idx, num_epochs=args.num_epochs,
-            device=args.device, lr=args.lr, output_path=out_path
+            pad_idx=pad_idx,
+            num_epochs=args.num_epochs,
+            device=args.device,
+            lr=args.lr,
+            output_path=out_path,
+            early_stop_patience=args.early_stop_patience,
+            early_stop_delta=args.early_stop_delta,
         )
+
 
     else:
         train_dataset = LineLevelDataset(
@@ -593,9 +631,14 @@ def main():
         out_path = args.output_model_path or "best_rnn_line_level.pt"
         train_line_level_rnn(
             model, train_loader, val_loader,
-            pad_idx=pad_idx, max_len=args.max_length,
-            num_epochs=args.num_epochs, device=args.device,
-            lr=args.lr, output_path=out_path
+            pad_idx=pad_idx,
+            max_len=args.max_length,
+            num_epochs=args.num_epochs,
+            device=args.device,
+            lr=args.lr,
+            output_path=out_path,
+            early_stop_patience=args.early_stop_patience,
+            early_stop_delta=args.early_stop_delta,
         )
 
     print("RNN baseline training complete!")
